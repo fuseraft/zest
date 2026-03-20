@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Zest — Package Manager for the Kiwi Programming Language
+# This wrapper sets ZEST_HOME and invokes the kiwi interpreter.
+
+set -e
+
+ZEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export ZEST_HOME="$ZEST_DIR"
+
+exec kiwi "${ZEST_DIR}/zest.kiwi" "$@"

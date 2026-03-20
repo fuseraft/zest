@@ -1,0 +1,162 @@
+/#
+@summary Semantic versioning utilities for Zest.
+Supports constraint operators: * latest ^ ~ >= > <= < and exact versions.
+#/
+package semver
+  /#
+  @summary Parse a version string into a hashmap of components.
+  @param string ver_str : Version string (e.g. "1.2.3", "v1.2.3", "1.2.3-beta.1").
+  @return hashmap : { major, minor, patch, prerelease }
+  #/
+  fn parse(ver_str: string): hashmap
+    s = ver_str.trim()
+    s = s.substring(1, s.size() - 1) when s.begins_with("v")
+
+    prerelease = ""
+
+    if s.contains("+")
+      plus_pos = s.index("+")
+      s = s.substring(0, plus_pos)
+    end
+
+    if s.contains("-")
+      dash_pos = s.index("-")
+      prerelease = s.substring(dash_pos + 1, s.size() - dash_pos - 1)
+      s = s.substring(0, dash_pos)
+    end
+
+    parts = s.split(".")
+    major = parts.size() > 0 ? parts[0].trim().to_integer() : 0
+    minor = parts.size() > 1 ? parts[1].trim().to_integer() : 0
+    patch = parts.size() > 2 ? parts[2].trim().to_integer() : 0
+
+    return { "major": major, "minor": minor, "patch": patch, "prerelease": prerelease }
+  end
+
+  /#
+  @summary Compare two version strings.
+  @param string a_str : First version.
+  @param string b_str : Second version.
+  @return integer : -1 if a < b, 0 if equal, 1 if a > b
+  #/
+  fn compare(a_str: string, b_str: string): integer
+    a = semver::parse(a_str)
+    b = semver::parse(b_str)
+
+    if a["major"] != b["major"]
+      return a["major"] > b["major"] ? 1 : -1
+    end
+
+    if a["minor"] != b["minor"]
+      return a["minor"] > b["minor"] ? 1 : -1
+    end
+
+    if a["patch"] != b["patch"]
+      return a["patch"] > b["patch"] ? 1 : -1
+    end
+
+    a_pre = a["prerelease"]
+    b_pre = b["prerelease"]
+
+    # A release without a prerelease tag is greater than one with
+    return 1 when a_pre == "" && b_pre != ""
+    return -1 when a_pre != "" && b_pre == ""
+    return a_pre > b_pre ? 1 : -1 when a_pre != b_pre
+
+    0
+  end
+
+  /#
+  @summary Check if a version satisfies a constraint.
+  @param string version : The version to check (e.g. "1.2.3").
+  @param string constraint : The constraint (e.g. "^1.0.0", "~1.2.0", ">=2.0.0", "*").
+  @return boolean
+  #/
+  fn satisfies(version: string, constraint: string): boolean
+    c = constraint.trim()
+
+    return true when c == "*" || c == "latest" || c == ""
+
+    # Comma-separated = AND logic (e.g. ">=1.0.0,<2.0.0")
+    if c.contains(",")
+      parts = c.split(",")
+      for part in parts do
+        if !semver::satisfies(version, part.trim())
+          return false
+        end
+      end
+      return true
+    end
+
+    # ^MAJOR.MINOR.PATCH — same major, >= minor.patch
+    if c.begins_with("^")
+      base = c.substring(1, c.size() - 1)
+      req = semver::parse(base)
+      ver = semver::parse(version)
+      return false when ver["major"] != req["major"]
+      return semver::compare(version, base) >= 0
+    end
+
+    # ~MAJOR.MINOR.PATCH — same major.minor, >= patch
+    if c.begins_with("~")
+      base = c.substring(1, c.size() - 1)
+      req = semver::parse(base)
+      ver = semver::parse(version)
+      return false when ver["major"] != req["major"] || ver["minor"] != req["minor"]
+      return semver::compare(version, base) >= 0
+    end
+
+    if c.begins_with(">=")
+      return semver::compare(version, c.substring(2, c.size() - 2)) >= 0
+    end
+
+    if c.begins_with(">")
+      return semver::compare(version, c.substring(1, c.size() - 1)) > 0
+    end
+
+    if c.begins_with("<=")
+      return semver::compare(version, c.substring(2, c.size() - 2)) <= 0
+    end
+
+    if c.begins_with("<")
+      return semver::compare(version, c.substring(1, c.size() - 1)) < 0
+    end
+
+    # Exact match
+    semver::compare(version, c) == 0
+  end
+
+  /#
+  @summary Find the highest version from a list satisfying all given constraints.
+  @param list versions : List of version strings.
+  @param list constraints : List of constraint strings (all must be satisfied).
+  @return string|null : Best matching version, or null if none.
+  #/
+  fn max_satisfying(versions: list, constraints: list): string
+    best = null
+    for v in versions do
+      ok = true
+      for c in constraints do
+        if !semver::satisfies(v, c)
+          ok = false
+          break
+        end
+      end
+      if ok
+        best = v when best == null || semver::compare(v, best) > 0
+      end
+    end
+    best
+  end
+
+  /#
+  @summary Sort a list of version strings in descending order (newest first).
+  @param list versions : List of version strings.
+  @return list : Sorted list.
+  #/
+  fn sort_desc(versions: list): list
+    versions.sort(with (a, b) do semver::compare(a, b) > 0 end)
+  end
+end
+
+export "semver"

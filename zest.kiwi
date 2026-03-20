@@ -1,0 +1,111 @@
+_zest_home = env::get("ZEST_HOME")
+if _zest_home == ""
+  _zest_home = fio::parentdir(fio::abspath("zest.kiwi"))
+end
+
+include "${_zest_home}/lib/semver.kiwi"
+include "${_zest_home}/lib/manifest.kiwi"
+include "${_zest_home}/lib/lockfile.kiwi"
+include "${_zest_home}/lib/fetcher.kiwi"
+include "${_zest_home}/lib/resolver.kiwi"
+include "${_zest_home}/lib/loader.kiwi"
+include "${_zest_home}/lib/commands/init.kiwi"
+include "${_zest_home}/lib/commands/install.kiwi"
+include "${_zest_home}/lib/commands/uninstall.kiwi"
+include "${_zest_home}/lib/commands/update.kiwi"
+include "${_zest_home}/lib/commands/list.kiwi"
+
+# --- CLI definition ---
+
+p = CliParser.new("zest <command> [pkg[@constraint] ...]", "Package manager for the Kiwi programming language")
+p.flag("dev",     "",  "Save as dev_dependency (install only)")
+p.flag("help",    "h", "Show this help message")
+p.flag("verbose", "v", "Verbose output")
+
+fn zest_help()
+  console::fg("WHITE")
+  println "Zest is a package manager for Kiwi."
+  console::reset()
+  println ""
+  p.help()
+  println "Commands:"
+  cli::kv("  init",             "Scaffold a kiwi.json in the current directory",     22)
+  cli::kv("  install [pkg]",    "Install from kiwi.json, or add a new package",      22)
+  cli::kv("  uninstall <pkg>",  "Remove a package  (aliases: remove, rm)",           22)
+  cli::kv("  update [pkg]",     "Update to latest satisfying version  (alias: up)",  22)
+  cli::kv("  list",             "List installed packages  (alias: ls)",              22)
+  cli::kv("  info <pkg>",       "Show detailed info for a package",                  22)
+  cli::kv("  cache clean",      "Clear all cached tarballs from ~/.zest/cache/",     22)
+  println ""
+  println "Package specifier examples:"
+  println "  owner/repo                 latest version"
+  println "  owner/repo@1.2.3           exact version"
+  println "  owner/repo@^1.0.0          compatible  (same major, >= minor.patch)"
+  println "  owner/repo@~1.2.0          patch-only  (same major.minor)"
+  println "  owner/repo@>=1.0.0,<2.0.0  version range"
+  println ""
+  println "Environment:"
+  cli::kv("  GITHUB_TOKEN", "Raises GitHub API rate limit from 60 to 5000 req/hr", 16)
+  println ""
+end
+
+fn zest_cache_clean()
+  home = env::get("HOME")
+  cache_dir = fio::combine([home, ".zest", "cache"])
+  if !fio::isdir(cache_dir)
+    cli::info("Cache is already empty.")
+    return null
+  end
+  if cli::confirm("Delete all cached tarballs in ${cache_dir}?")
+    fio::rmdirf(cache_dir)
+    fio::mkdir(cache_dir)
+    cli::success("Cache cleared.")
+  end
+end
+
+# --- Parse args and extract command + targets ---
+
+flags    = p.parse()
+argv     = flags["_args"]
+command  = argv.empty() ? "" : argv.first()
+
+# targets = every positional arg after the command name
+targets = []
+if argv.size() > 1
+  for i in [1 to argv.size() - 1] do
+    targets.push(argv[i])
+  end
+end
+
+# --- Dispatch ---
+
+if flags["help"] || command == ""
+  zest_help()
+  exit(0)
+end
+
+if command == "init"
+  cmd_init::run(targets, flags)
+elsif command == "install" || command == "add" || command == "i"
+  cmd_install::run(targets, flags)
+elsif command == "uninstall" || command == "remove" || command == "rm"
+  cmd_uninstall::run(targets, flags)
+elsif command == "update" || command == "upgrade" || command == "up"
+  cmd_update::run(targets, flags)
+elsif command == "list" || command == "ls"
+  cmd_list::run(targets, flags)
+elsif command == "info" || command == "show"
+  cmd_list::run(targets, flags)
+elsif command == "cache"
+  sub = targets.empty() ? "" : targets.first()
+  if sub == "clean" || sub == "clear"
+    zest_cache_clean()
+  else
+    cli::error("Unknown cache subcommand: '${sub}'. Try: zest cache clean")
+  end
+else
+  cli::error("Unknown command: '${command}'")
+  println ""
+  zest_help()
+  exit(1)
+end

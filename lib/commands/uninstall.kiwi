@@ -1,0 +1,54 @@
+package cmd_uninstall
+  /#
+  @summary Remove packages from the project.
+  targets : list of package specifiers to remove
+  The global cache (~/.zest/packages/) is NOT deleted; use `zest cache clean` for that.
+  #/
+  fn run(targets: list, flags: hashmap)
+    if !manifest::exists()
+      cli::error("No kiwi.json found. Run `zest init` first.")
+      return null
+    end
+
+    if targets.empty()
+      cli::error("Usage: zest uninstall <owner/repo> [owner/repo ...]")
+      return null
+    end
+
+    mfst      = manifest::load()
+    lock_data = lockfile::load()
+    changed   = false
+
+    for spec in targets do
+      pkg_id = ""
+      try
+        parsed = fetcher::parse_spec(spec)
+        pkg_id = parsed["id"]
+      catch (e, m)
+        cli::error(m)
+        next
+      end
+
+      all_deps = manifest::all_deps(mfst)
+      if !all_deps.has_key(pkg_id)
+        cli::warn("${pkg_id} is not listed in kiwi.json")
+        next
+      end
+
+      mfst      = manifest::remove_dep(mfst, pkg_id)
+      lock_data = lockfile::unpin(lock_data, pkg_id)
+      cli::success("Removed ${pkg_id}")
+      changed = true
+    end
+
+    if changed
+      manifest::save(mfst)
+      lockfile::save(lock_data)
+      loader::generate(lock_data)
+      println ""
+      cli::info("Run `zest install` to update the load file.")
+    end
+  end
+end
+
+export "cmd_uninstall"

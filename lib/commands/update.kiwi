@@ -1,0 +1,154 @@
+package cmd_update
+  /#
+  @summary Update packages to the latest version satisfying their constraints.
+  targets = [] : update all dependencies
+  targets = [...] : update only the listed packages
+  #/
+  fn run(targets: list, flags: hashmap)
+    if !manifest::exists()
+      cli::error("No kiwi.json found. Run `zest init` first.")
+      return null
+    end
+
+    mfst = manifest::load()
+
+    if targets.empty()
+      cmd_update::_update_all(mfst)
+    else
+      for spec in targets do
+        cmd_update::_update_one(mfst, spec)
+      end
+    end
+  end
+
+  fn _update_all(mfst: hashmap)
+    cli::header("Updating all packages")
+
+    all_deps = manifest::all_deps(mfst)
+    if all_deps.empty()
+      println "  No dependencies declared."
+      return null
+    end
+
+    lock_data     = lockfile::load()
+    updated_count = 0
+
+    resolved = {}
+    try
+      resolved = resolver::resolve(mfst)
+    catch (e, m)
+      cli::error(m)
+      return null
+    end
+
+    for pkg_id, new_version in resolved do
+      existing    = lockfile::get(lock_data, pkg_id)
+      old_version = existing != null ? existing["version"] : null
+
+      if old_version != null && old_version == new_version
+        cli::info("${pkg_id} already at ${new_version}")
+        next
+      end
+
+      result = {}
+      try
+        result = fetcher::install(pkg_id, new_version)
+      catch (e, m)
+        cli::error("Failed to update ${pkg_id}: ${m}")
+        next
+      end
+
+      pkg_mfst     = fetcher::get_package_manifest(pkg_id, new_version)
+      dep_versions = {}
+      for dep_id, _ in pkg_mfst["dependencies"] do
+        dep_entry = lockfile::get(lock_data, dep_id)
+        dep_versions[dep_id] = dep_entry["version"] when dep_entry != null
+      end
+
+      lock_data = lockfile::pin(lock_data, pkg_id, new_version, "", result["sha256"], result["main"], dep_versions)
+
+      if old_version != null
+        cli::success("${pkg_id}: ${old_version} → ${new_version}")
+      else
+        cli::success("${pkg_id}: installed ${new_version}")
+      end
+      updated_count += 1
+    end
+
+    lockfile::save(lock_data)
+    loader::generate(lock_data)
+
+    println ""
+    cli::info("${updated_count} package(s) updated.")
+  end
+
+  fn _update_one(mfst: hashmap, spec: string)
+    pkg_id = ""
+    try
+      parsed = fetcher::parse_spec(spec)
+      pkg_id = parsed["id"]
+    catch (e, m)
+      cli::error(m)
+      return null
+    end
+
+    all_deps = manifest::all_deps(mfst)
+    if !all_deps.has_key(pkg_id)
+      cli::error("${pkg_id} is not listed in kiwi.json")
+      return null
+    end
+
+    constraint = all_deps[pkg_id]
+    cli::header("Updating ${pkg_id}")
+
+    versions = []
+    try
+      versions = fetcher::get_versions(pkg_id)
+    catch (e, m)
+      cli::error(m)
+      return null
+    end
+
+    best = semver::max_satisfying(versions, [constraint])
+    if best == null
+      cli::error("No version of ${pkg_id} satisfies '${constraint}'")
+      return null
+    end
+
+    lock_data   = lockfile::load()
+    existing    = lockfile::get(lock_data, pkg_id)
+    old_version = existing != null ? existing["version"] : null
+
+    if old_version != null && old_version == best
+      cli::info("${pkg_id} is already up to date at ${best}")
+      return null
+    end
+
+    result = {}
+    try
+      result = fetcher::install(pkg_id, best)
+    catch (e, m)
+      cli::error("Failed to update ${pkg_id}: ${m}")
+      return null
+    end
+
+    pkg_mfst     = fetcher::get_package_manifest(pkg_id, best)
+    dep_versions = {}
+    for dep_id, _ in pkg_mfst["dependencies"] do
+      dep_entry = lockfile::get(lock_data, dep_id)
+      dep_versions[dep_id] = dep_entry["version"] when dep_entry != null
+    end
+
+    lock_data = lockfile::pin(lock_data, pkg_id, best, "", result["sha256"], result["main"], dep_versions)
+    lockfile::save(lock_data)
+    loader::generate(lock_data)
+
+    if old_version != null
+      cli::success("${pkg_id}: ${old_version} → ${best}")
+    else
+      cli::success("${pkg_id}: installed ${best}")
+    end
+  end
+end
+
+export "cmd_update"

@@ -1,0 +1,127 @@
+package cmd_list
+  /#
+  @summary List installed packages or show info for specific packages.
+  targets = [] : list all packages in the project
+  targets = [...] : show detailed info for each listed package
+  #/
+  fn run(targets: list, flags: hashmap)
+    if !manifest::exists()
+      cli::error("No kiwi.json found.")
+      return null
+    end
+
+    if targets.empty()
+      cmd_list::_list_all()
+    else
+      for spec in targets do
+        cmd_list::_show_info(spec)
+      end
+    end
+  end
+
+  fn _list_all()
+    mfst      = manifest::load()
+    lock_data = lockfile::load()
+
+    proj_name = mfst["name"]
+    proj_ver  = mfst["version"]
+    cli::header("Installed packages — ${proj_name} v${proj_ver}")
+
+    direct_deps = mfst["dependencies"]
+    dev_deps    = mfst["dev_dependencies"]
+    pkgs        = lock_data["packages"]
+
+    if direct_deps.empty() && dev_deps.empty()
+      println "  No dependencies declared."
+      return null
+    end
+
+    if !direct_deps.empty()
+      println "\nDependencies:"
+      for pkg_id, constraint in direct_deps do
+        entry = lockfile::get(lock_data, pkg_id)
+        if entry != null
+          installed = entry["version"]
+          ok        = semver::satisfies(installed, constraint)
+          status    = ok ? "✓" : "!"
+          cli::kv("  ${status} ${pkg_id}", "${installed} (${constraint})", 44)
+        else
+          cli::kv("  ? ${pkg_id}", "not installed (${constraint})", 44)
+        end
+      end
+    end
+
+    if !dev_deps.empty()
+      println "\nDev dependencies:"
+      for pkg_id, constraint in dev_deps do
+        entry = lockfile::get(lock_data, pkg_id)
+        if entry != null
+          installed = entry["version"]
+          ok        = semver::satisfies(installed, constraint)
+          status    = ok ? "✓" : "!"
+          cli::kv("  ${status} ${pkg_id}", "${installed} (${constraint})", 44)
+        else
+          cli::kv("  ? ${pkg_id}", "not installed (${constraint})", 44)
+        end
+      end
+    end
+
+    # Transitive deps not declared directly in the manifest
+    transitive = []
+    for pkg_id, _ in pkgs do
+      if !direct_deps.has_key(pkg_id) && !dev_deps.has_key(pkg_id)
+        transitive.push(pkg_id)
+      end
+    end
+
+    if !transitive.empty()
+      println "\nTransitive dependencies:"
+      for pkg_id in transitive do
+        entry = pkgs[pkg_id]
+        ver   = entry["version"]
+        cli::kv("    ${pkg_id}", ver, 44)
+      end
+    end
+
+    println ""
+  end
+
+  fn _show_info(spec: string)
+    pkg_id = ""
+    try
+      parsed = fetcher::parse_spec(spec)
+      pkg_id = parsed["id"]
+    catch (e, m)
+      cli::error(m)
+      return null
+    end
+
+    lock_data = lockfile::load()
+    entry     = lockfile::get(lock_data, pkg_id)
+
+    if entry == null
+      cli::warn("${pkg_id} is not installed in this project.")
+      return null
+    end
+
+    version = entry["version"]
+    cli::header(pkg_id)
+    cli::kv("Version",      version)
+    cli::kv("Main file",    entry["main"] != "" ? entry["main"] : "(none)")
+    cli::kv("Install path", fetcher::install_path(pkg_id, version))
+    sha_short = entry["sha256"] != "" ? entry["sha256"].substring(0, 16) + "..." : "(unknown)"
+    cli::kv("SHA256",       sha_short)
+    cli::kv("Resolved",     entry["resolved"])
+
+    deps = entry["dependencies"]
+    if !deps.empty()
+      println "\nDependencies of this package:"
+      for dep_id, dep_ver in deps do
+        cli::kv("  ${dep_id}", dep_ver, 44)
+      end
+    end
+    println ""
+  end
+end
+
+export "cmd_list"

@@ -1,0 +1,37 @@
+package cmd_init
+  fn run(targets: list, flags: hashmap)
+    if manifest::exists()
+      if !cli::confirm("kiwi.json already exists. Overwrite?")
+        println "Aborted."
+        return null
+      end
+    end
+
+    cwd = fio::cwd()
+    default_name = fio::filename(cwd)
+
+    cli::header("Initializing Kiwi project")
+
+    name = cli::prompt("Package name (${default_name}): ").trim()
+    name = default_name when name == ""
+
+    version = cli::prompt("Version (0.1.0): ").trim()
+    version = "0.1.0" when version == ""
+
+    description = cli::prompt("Description: ").trim()
+
+    data = manifest::empty(name)
+    data["version"] = version
+    data["description"] = description
+
+    manifest::save(data)
+    loader::ensure_gitignore()
+
+    cli::success("Created kiwi.json")
+    println ""
+    println "  Run `zest install <owner/repo>` to add packages."
+    println "  Add `include \".zest/load.kiwi\"` to your scripts."
+  end
+end
+
+export "cmd_init"

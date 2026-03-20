@@ -1,0 +1,128 @@
+/#
+@summary Read and write kiwi.lock files for Zest.
+The lock file pins exact resolved versions with checksums to ensure
+reproducible installs and prevent dependency hell.
+#/
+package lockfile
+  const LOCK_FILE = "kiwi.lock"
+  const LOCK_VERSION = 1
+
+  /#
+  @summary Return an empty lock file structure.
+  @return hashmap
+  #/
+  fn empty(): hashmap
+    { "lockfile_version": lockfile::LOCK_VERSION, "packages": {} }
+  end
+
+  /#
+  @summary Check whether a kiwi.lock exists in a directory.
+  @param string dir : Directory path (defaults to CWD).
+  @return boolean
+  #/
+  fn exists(dir: string = ""): boolean
+    fio::isfile(lockfile::_path(dir))
+  end
+
+  /#
+  @summary Load and parse a kiwi.lock file.
+  @param string dir : Directory (defaults to CWD).
+  @return hashmap : The lock data.
+  #/
+  fn load(dir: string = ""): hashmap
+    path = lockfile::_path(dir)
+    if !fio::isfile(path)
+      return lockfile::empty()
+    end
+    raw = fio::read(path)
+    json::parse(raw)
+  end
+
+  /#
+  @summary Save a lock hashmap to kiwi.lock.
+  @param hashmap data : The lock data.
+  @param string dir : Directory (defaults to CWD).
+  #/
+  fn save(data: hashmap, dir: string = "")
+    path = lockfile::_path(dir)
+    fio::write(path, json::stringify(data, true))
+  end
+
+  /#
+  @summary Add or update a resolved package entry in the lock data.
+  @param hashmap data : Lock data to mutate.
+  @param string pkg_id : Package ID ("owner/repo").
+  @param string version : Resolved exact version.
+  @param string resolved_url : Download URL.
+  @param string sha256 : Checksum of the downloaded tarball.
+  @param string main_file : Relative path to the package's main .kiwi file.
+  @param hashmap deps : Direct dependency versions { pkg_id => version }.
+  @return hashmap : Updated lock data.
+  #/
+  fn pin(data: hashmap, pkg_id: string, version: string, resolved_url: string, sha256: string, main_file: string, deps: hashmap): hashmap
+    entry = {
+      "version": version,
+      "resolved": resolved_url,
+      "sha256": sha256,
+      "main": main_file,
+      "dependencies": deps
+    }
+    pkgs = data["packages"]
+    pkgs[pkg_id] = entry
+    data["packages"] = pkgs
+    data
+  end
+
+  /#
+  @summary Remove a package entry from lock data.
+  @param hashmap data : Lock data.
+  @param string pkg_id : Package ID.
+  @return hashmap : Updated lock data.
+  #/
+  fn unpin(data: hashmap, pkg_id: string): hashmap
+    pkgs = data["packages"]
+    if pkgs.has_key(pkg_id)
+      pkgs.remove(pkg_id)
+      data["packages"] = pkgs
+    end
+    data
+  end
+
+  /#
+  @summary Get the pinned entry for a package, or null if not locked.
+  @param hashmap data : Lock data.
+  @param string pkg_id : Package ID.
+  @return hashmap|null
+  #/
+  fn get(data: hashmap, pkg_id: string)
+    pkgs = data["packages"]
+    return pkgs[pkg_id] when pkgs.has_key(pkg_id)
+    null
+  end
+
+  /#
+  @summary Check whether all packages in a manifest are pinned in the lock.
+  @param hashmap lock_data : Lock data.
+  @param hashmap manifest_data : Manifest data.
+  @return boolean
+  #/
+  fn is_complete(lock_data: hashmap, manifest_data: hashmap): boolean
+    all_deps = manifest::all_deps(manifest_data)
+    pkgs = lock_data["packages"]
+    for pkg_id, _ in all_deps do
+      return false when !pkgs.has_key(pkg_id)
+    end
+    true
+  end
+
+  # --- Private helpers ---
+
+  fn _path(dir: string): string
+    if dir == ""
+      return lockfile::LOCK_FILE
+    end
+    fio::combine([dir, lockfile::LOCK_FILE])
+  end
+end
+
+export "lockfile"

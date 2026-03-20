@@ -1,0 +1,132 @@
+/#
+@summary Read and write kiwi.json project manifests for Zest.
+#/
+package manifest
+  const MANIFEST_FILE = "kiwi.json"
+
+  /#
+  @summary Return an empty manifest skeleton.
+  @param string name : Project name.
+  @return hashmap
+  #/
+  fn empty(name: string): hashmap
+    {
+      "name": name,
+      "version": "0.1.0",
+      "description": "",
+      "kiwi": ">=1.4.0",
+      "dependencies": {},
+      "dev_dependencies": {}
+    }
+  end
+
+  /#
+  @summary Check whether a kiwi.json exists in a directory.
+  @param string dir : Directory path (defaults to CWD).
+  @return boolean
+  #/
+  fn exists(dir: string = ""): boolean
+    path = manifest::_path(dir)
+    fio::isfile(path)
+  end
+
+  /#
+  @summary Load and parse a kiwi.json from a directory.
+  @param string dir : Directory containing kiwi.json (defaults to CWD).
+  @return hashmap : The parsed manifest.
+  @throws string : If the file does not exist or is invalid JSON.
+  #/
+  fn load(dir: string = ""): hashmap
+    path = manifest::_path(dir)
+    if !fio::isfile(path)
+      throw "No kiwi.json found at ${path}"
+    end
+    raw = fio::read(path)
+    data = json::parse(raw)
+    manifest::_fill_defaults(data)
+  end
+
+  /#
+  @summary Save a manifest hashmap to kiwi.json.
+  @param hashmap data : The manifest data.
+  @param string dir : Directory to write to (defaults to CWD).
+  #/
+  fn save(data: hashmap, dir: string = "")
+    path = manifest::_path(dir)
+    fio::write(path, json::stringify(data, true))
+  end
+
+  /#
+  @summary Add or update a dependency in a manifest hashmap.
+  @param hashmap data : Manifest to update.
+  @param string pkg_id : Package ID (e.g. "owner/repo").
+  @param string constraint : Version constraint (e.g. "^1.0.0").
+  @param boolean dev : If true, add to dev_dependencies.
+  @return hashmap : Updated manifest.
+  #/
+  fn add_dep(data: hashmap, pkg_id: string, constraint: string, dev: boolean = false): hashmap
+    key = dev ? "dev_dependencies" : "dependencies"
+    deps = data[key]
+    deps[pkg_id] = constraint
+    data[key] = deps
+    data
+  end
+
+  /#
+  @summary Remove a dependency from a manifest hashmap.
+  @param hashmap data : Manifest to update.
+  @param string pkg_id : Package ID.
+  @return hashmap : Updated manifest (dependency removed from both dep lists).
+  #/
+  fn remove_dep(data: hashmap, pkg_id: string): hashmap
+    deps = data["dependencies"]
+    dev_deps = data["dev_dependencies"]
+    if deps.has_key(pkg_id)
+      deps.remove(pkg_id)
+      data["dependencies"] = deps
+    end
+    if dev_deps.has_key(pkg_id)
+      dev_deps.remove(pkg_id)
+      data["dev_dependencies"] = dev_deps
+    end
+    data
+  end
+
+  /#
+  @summary Return all declared dependencies (both regular and dev).
+  @param hashmap data : Manifest.
+  @param boolean include_dev : If true, include dev_dependencies (default true).
+  @return hashmap : Merged dependency map { pkg_id => constraint }.
+  #/
+  fn all_deps(data: hashmap, include_dev: boolean = true): hashmap
+    result = {}
+    for k, v in data["dependencies"] do
+      result[k] = v
+    end
+    if include_dev
+      for k, v in data["dev_dependencies"] do
+        result[k] = v
+      end
+    end
+    result
+  end
+
+  # --- Private helpers ---
+
+  fn _path(dir: string): string
+    if dir == ""
+      return manifest::MANIFEST_FILE
+    end
+    fio::combine([dir, manifest::MANIFEST_FILE])
+  end
+
+  fn _fill_defaults(data: hashmap): hashmap
+    data["version"] = "0.1.0" when !data.has_key("version") || data["version"] == ""
+    data["dependencies"] = {} when !data.has_key("dependencies")
+    data["dev_dependencies"] = {} when !data.has_key("dev_dependencies")
+    data["kiwi"] = ">=1.4.0" when !data.has_key("kiwi")
+    data
+  end
+end
+
+export "manifest"

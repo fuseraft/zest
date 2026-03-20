@@ -1,0 +1,146 @@
+package cmd_install
+  /#
+  @summary Install packages.
+  targets = [] : install all dependencies from kiwi.json
+  targets = [...] : install and save each specified package
+  flags["dev"] : save to dev_dependencies instead of dependencies
+  #/
+  fn run(targets: list, flags: hashmap)
+    if !manifest::exists()
+      cli::error("No kiwi.json found. Run `zest init` first.")
+      return null
+    end
+
+    is_dev = flags.has_key("dev") && flags["dev"]
+
+    if targets.empty()
+      cmd_install::_install_all()
+    else
+      for spec in targets do
+        cmd_install::_install_one(spec, is_dev)
+      end
+    end
+  end
+
+  fn _install_all()
+    cli::header("Installing packages")
+    mfst = manifest::load()
+    lock_data = lockfile::load()
+
+    all_deps = manifest::all_deps(mfst)
+    if all_deps.empty()
+      println "  No dependencies declared in kiwi.json."
+      return null
+    end
+
+    cli::info("Resolving dependencies...")
+    resolved = {}
+    try
+      resolved = resolver::resolve(mfst)
+    catch (e, m)
+      cli::error(m)
+      return null
+    end
+
+    for pkg_id, version in resolved do
+      lock_data = cmd_install::_do_install(pkg_id, version, lock_data)
+    end
+
+    lockfile::save(lock_data)
+    loader::generate(lock_data)
+    loader::ensure_gitignore()
+
+    println ""
+    cli::success("All packages installed. Add this to your scripts:")
+    println "  include \".zest/load.kiwi\""
+  end
+
+  fn _install_one(spec: string, is_dev: boolean)
+    parsed = {}
+    try
+      parsed = fetcher::parse_spec(spec)
+    catch (e, m)
+      cli::error(m)
+      return null
+    end
+
+    pkg_id     = parsed["id"]
+    constraint = parsed["constraint"]
+
+    cli::header("Installing ${pkg_id}")
+
+    versions = []
+    try
+      versions = fetcher::get_versions(pkg_id)
+    catch (e, m)
+      cli::error(m)
+      return null
+    end
+
+    if versions.empty()
+      cli::error("No tagged releases found for ${pkg_id}")
+      return null
+    end
+
+    best = semver::max_satisfying(versions, [constraint])
+    if best == null
+      sorted   = semver::sort_desc(versions)
+      avail    = sorted.size() > 5 ? sorted[0 : 5] : sorted
+      avail_str = avail.join(", ")
+      cli::error("No version of ${pkg_id} satisfies '${constraint}'")
+      cli::info("Available: ${avail_str}")
+      return null
+    end
+
+    mfst      = manifest::load()
+    mfst      = manifest::add_dep(mfst, pkg_id, constraint, is_dev)
+    lock_data = lockfile::load()
+
+    resolved = {}
+    try
+      resolved = resolver::resolve(mfst)
+    catch (e, m)
+      cli::error("Dependency conflict: ${m}")
+      return null
+    end
+
+    for r_pkg_id, r_version in resolved do
+      lock_data = cmd_install::_do_install(r_pkg_id, r_version, lock_data)
+    end
+
+    manifest::save(mfst)
+    lockfile::save(lock_data)
+    loader::generate(lock_data)
+    loader::ensure_gitignore()
+
+    dep_type = is_dev ? "devDependency" : "dependency"
+    println ""
+    cli::success("Added ${pkg_id}@${best} as ${dep_type}")
+    cli::info("Add `include \".zest/load.kiwi\"` to your scripts.")
+  end
+
+  fn _do_install(pkg_id: string, version: string, lock_data: hashmap): hashmap
+    existing = lockfile::get(lock_data, pkg_id)
+    return lock_data when existing != null && existing["version"] == version
+
+    result = {}
+    try
+      result = fetcher::install(pkg_id, version)
+    catch (e, m)
+      cli::error("Failed to install ${pkg_id}@${version}: ${m}")
+      return lock_data
+    end
+
+    pkg_mfst    = fetcher::get_package_manifest(pkg_id, version)
+    dep_versions = {}
+    for dep_id, _ in pkg_mfst["dependencies"] do
+      dep_entry = lockfile::get(lock_data, dep_id)
+      dep_versions[dep_id] = dep_entry["version"] when dep_entry != null
+    end
+
+    resolved_url = "https://github.com/${pkg_id}/archive/refs/tags/v${version}.tar.gz"
+    lockfile::pin(lock_data, pkg_id, version, resolved_url, result["sha256"], result["main"], dep_versions)
+  end
+end
+
+export "cmd_install"

@@ -1,0 +1,306 @@
+/#
+@summary GitHub-backed package fetcher for Zest.
+Downloads packages from GitHub releases/tags and manages the global cache.
+Set GITHUB_TOKEN environment variable to avoid API rate limits (60 req/hr unauthenticated).
+#/
+package fetcher
+  /#
+  @summary Normalize a package specifier to "owner/repo" form.
+  Handles:
+    - "owner/repo"
+    - "github.com/owner/repo"
+    - "https://github.com/owner/repo"
+    - "https://github.com/owner/repo.git"
+  @param string spec : Raw package specifier.
+  @return string : Normalized "owner/repo" string.
+  @throws string : If the specifier cannot be parsed.
+  #/
+  fn normalize_id(spec: string): string
+    s = spec.trim()
+
+    # Strip trailing .git
+    s = s.substring(0, s.size() - 4) when s.ends_with(".git")
+
+    # Strip https:// or http://
+    s = s.substring(8, s.size() - 8) when s.begins_with("https://")
+    s = s.substring(7, s.size() - 7) when s.begins_with("http://")
+
+    # Strip github.com/ prefix
+    s = s.substring(11, s.size() - 11) when s.begins_with("github.com/")
+
+    # Now should be "owner/repo"
+    parts = s.split("/")
+    if parts.size() < 2
+      throw "Cannot parse package specifier: '${spec}'. Expected 'owner/repo'."
+    end
+
+    "${parts[0]}/${parts[1]}"
+  end
+
+  /#
+  @summary Parse a package specifier that may include a version constraint.
+  E.g. "owner/repo@^1.0.0" → { id: "owner/repo", constraint: "^1.0.0" }
+  @param string spec : Raw specifier (with optional @constraint).
+  @return hashmap : { "id": string, "constraint": string }
+  #/
+  fn parse_spec(spec: string): hashmap
+    s = spec.trim()
+    constraint = "*"
+
+    if s.contains("@")
+      at_pos = s.index("@")
+      constraint = s.substring(at_pos + 1, s.size() - at_pos - 1)
+      s = s.substring(0, at_pos)
+    end
+
+    { "id": fetcher::normalize_id(s), "constraint": constraint }
+  end
+
+  /#
+  @summary Fetch available version tags for a package from GitHub.
+  @param string pkg_id : "owner/repo"
+  @return list : List of version strings (e.g. ["1.2.3", "1.1.0", "1.0.0"]).
+  @throws string : On HTTP error or no tags found.
+  #/
+  fn get_versions(pkg_id: string): list
+    parts = pkg_id.split("/")
+    owner = parts[0]
+    repo = parts[1]
+
+    headers = fetcher::_auth_headers()
+    url = "https://api.github.com/repos/${owner}/${repo}/tags?per_page=100"
+
+    resp = http::get(url, headers)
+
+    if !resp.ok
+      if resp.status == 404
+        throw "Package not found: ${pkg_id}. Check that the GitHub repo exists."
+      end
+      if resp.status == 403
+        throw "GitHub API rate limit exceeded. Set GITHUB_TOKEN environment variable for higher limits."
+      end
+      throw "GitHub API error ${resp.status} fetching versions for ${pkg_id}"
+    end
+
+    tags = resp.json()
+    versions = []
+
+    for tag in tags do
+      name = tag["name"]
+      # Strip leading 'v' for semver parsing, but store the clean version
+      clean = name
+      clean = clean.substring(1, clean.size() - 1) when clean.begins_with("v")
+      # Only include tags that look like semver (contain at least one dot)
+      versions.push(clean) when clean.contains(".")
+    end
+
+    versions
+  end
+
+  /#
+  @summary Fetch the kiwi.json manifest for a specific version of a package.
+  Returns an empty manifest if the package doesn't have one.
+  @param string pkg_id : "owner/repo"
+  @param string version : Exact version string.
+  @return hashmap : Parsed manifest (or empty defaults).
+  #/
+  fn get_package_manifest(pkg_id: string, version: string): hashmap
+    parts = pkg_id.split("/")
+    owner = parts[0]
+    repo = parts[1]
+
+    # Try fetching kiwi.json from the repo at that tag
+    tag = "v${version}"
+    url = "https://raw.githubusercontent.com/${owner}/${repo}/${tag}/kiwi.json"
+
+    headers = fetcher::_auth_headers()
+    resp = http::get(url, headers)
+
+    if !resp.ok
+      # Try without 'v' prefix
+      url = "https://raw.githubusercontent.com/${owner}/${repo}/${version}/kiwi.json"
+      resp = http::get(url, headers)
+    end
+
+    if !resp.ok
+      # No kiwi.json — return minimal defaults
+      return { "name": repo, "version": version, "dependencies": {}, "dev_dependencies": {} }
+    end
+
+    data = json::parse(resp.text())
+    data["dependencies"] = {} when !data.has_key("dependencies")
+    data["dev_dependencies"] = {} when !data.has_key("dev_dependencies")
+    data["name"] = repo when !data.has_key("name")
+    data
+  end
+
+  /#
+  @summary Download and extract a package to the global cache.
+  Skips download if the version is already cached and checksum matches.
+  @param string pkg_id : "owner/repo"
+  @param string version : Exact version string.
+  @return hashmap : { "path": install_dir, "sha256": checksum, "main": main_file }
+  @throws string : On download or extraction failure.
+  #/
+  fn install(pkg_id: string, version: string): hashmap
+    parts = pkg_id.split("/")
+    owner = parts[0]
+    repo = parts[1]
+
+    install_dir = fetcher::_install_dir(pkg_id, version)
+
+    # Already installed — verify and return
+    if fio::isdir(install_dir)
+      main_file = fetcher::_detect_main(install_dir, repo)
+      sha256 = fetcher::_read_sha256(install_dir)
+      return { "path": install_dir, "sha256": sha256, "main": main_file }
+    end
+
+    # Download tarball
+    tarball = fetcher::_cache_tarball_path(pkg_id, version)
+    cache_dir = fetcher::_cache_dir()
+    fio::mkdirp(cache_dir)
+
+    if !fio::isfile(tarball)
+      tag = "v${version}"
+      url = "https://github.com/${owner}/${repo}/archive/refs/tags/${tag}.tar.gz"
+      cli::info("Downloading ${pkg_id}@${version}...")
+      ok = http::await_download(url, tarball)
+      if !ok
+        # Try without 'v' prefix
+        url = "https://github.com/${owner}/${repo}/archive/refs/tags/${version}.tar.gz"
+        ok = http::await_download(url, tarball)
+      end
+      if !ok
+        throw "Failed to download ${pkg_id}@${version}"
+      end
+    end
+
+    # Compute SHA256
+    sha256 = fetcher::_sha256(tarball)
+
+    # Extract to install directory
+    fio::mkdirp(install_dir)
+    exit_code = sys::exec("tar", ["-xzf", tarball, "-C", install_dir, "--strip-components=1"])
+    if exit_code != 0
+      fio::rmdirf(install_dir)
+      throw "Failed to extract ${pkg_id}@${version}"
+    end
+
+    # Write sha256 file for future verification
+    fio::write(fio::combine([install_dir, ".sha256"]), sha256)
+
+    main_file = fetcher::_detect_main(install_dir, repo)
+    cli::success("Installed ${pkg_id}@${version}")
+
+    { "path": install_dir, "sha256": sha256, "main": main_file }
+  end
+
+  /#
+  @summary Remove a specific version of a package from the global cache.
+  @param string pkg_id : "owner/repo"
+  @param string version : Version to remove.
+  #/
+  fn uninstall(pkg_id: string, version: string)
+    install_dir = fetcher::_install_dir(pkg_id, version)
+    fio::rmdirf(install_dir) when fio::isdir(install_dir)
+    tarball = fetcher::_cache_tarball_path(pkg_id, version)
+    fio::remove(tarball) when fio::isfile(tarball)
+  end
+
+  /#
+  @summary Get the absolute installation directory for a package version.
+  @param string pkg_id : "owner/repo"
+  @param string version : Version string.
+  @return string : Absolute path.
+  #/
+  fn install_path(pkg_id: string, version: string): string
+    fetcher::_install_dir(pkg_id, version)
+  end
+
+  # --- Private helpers ---
+
+  fn _zest_home(): string
+    home = env::get("HOME")
+    fio::combine([home, ".zest"])
+  end
+
+  fn _cache_dir(): string
+    fio::combine([fetcher::_zest_home(), "cache"])
+  end
+
+  fn _packages_dir(): string
+    fio::combine([fetcher::_zest_home(), "packages"])
+  end
+
+  fn _install_dir(pkg_id: string, version: string): string
+    parts = pkg_id.split("/")
+    fio::combine([fetcher::_packages_dir(), parts[0], parts[1], version])
+  end
+
+  fn _cache_tarball_path(pkg_id: string, version: string): string
+    safe_id = pkg_id.replace("/", "-")
+    fio::combine([fetcher::_cache_dir(), "${safe_id}-${version}.tar.gz"])
+  end
+
+  fn _auth_headers(): hashmap
+    token = env::get("GITHUB_TOKEN")
+    base = { "Accept": "application/vnd.github+json", "User-Agent": "zest/1.0 kiwi-package-manager" }
+    if token != ""
+      base["Authorization"] = "token ${token}"
+    end
+    base
+  end
+
+  fn _sha256(path: string): string
+    result = sys::execout("sha256sum", [path])
+    if result["exit_code"] != 0
+      return ""
+    end
+    parts = result["stdout"].trim().split(" ")
+    parts[0]
+  end
+
+  fn _read_sha256(install_dir: string): string
+    sha_file = fio::combine([install_dir, ".sha256"])
+    return fio::read(sha_file).trim() when fio::isfile(sha_file)
+    ""
+  end
+
+  fn _detect_main(install_dir: string, repo_name: string): string
+    # 1. Check kiwi.json "main" field
+    manifest_path = fio::combine([install_dir, "kiwi.json"])
+    if fio::isfile(manifest_path)
+      pkg_data = json::parse(fio::read(manifest_path))
+      if pkg_data.has_key("main") && pkg_data["main"] != ""
+        candidate = fio::combine([install_dir, pkg_data["main"]])
+        return pkg_data["main"] when fio::isfile(candidate)
+      end
+    end
+
+    # 2. Try common entry point patterns
+    candidates = [
+      "${repo_name}.kiwi",
+      "index.kiwi",
+      "main.kiwi",
+      "lib/${repo_name}.kiwi",
+      "src/${repo_name}.kiwi"
+    ]
+
+    for candidate in candidates do
+      full = fio::combine([install_dir, candidate])
+      return candidate when fio::isfile(full)
+    end
+
+    # 3. Find the first .kiwi file in the root
+    files = fio::glob(install_dir, ["*.kiwi"])
+    if !files.empty()
+      first = files.first()
+      return fio::filename(first)
+    end
+
+    ""
+  end
+end
+
+export "fetcher"

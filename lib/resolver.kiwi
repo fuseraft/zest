@@ -1,0 +1,111 @@
+/#
+@summary Dependency resolution for Zest.
+Uses version unification: for each package, find the highest single version
+that satisfies ALL constraints across the entire dependency graph.
+This avoids nested duplicate installs (no "dependency hell").
+#/
+package resolver
+  /#
+  @summary Resolve all dependencies for a project manifest.
+  Performs a BFS through the dependency tree, collects all version constraints
+  per package, then finds the highest version satisfying every constraint.
+
+  @param hashmap mfst : The project's parsed kiwi.json.
+  @param boolean include_dev : Whether to include dev_dependencies.
+  @return hashmap : { pkg_id => resolved_version_string }
+  @throws string : On version conflicts or unresolvable constraints.
+  #/
+  fn resolve(mfst: hashmap, include_dev: boolean = true): hashmap
+    # constraints_map: pkg_id => list of constraint strings
+    constraints_map = {}
+    # version_cache: pkg_id => list of available version strings (avoids duplicate API calls)
+    version_cache = {}
+
+    # Seed queue with project's direct dependencies
+    queue = []
+    all_direct = manifest::all_deps(mfst, include_dev)
+
+    for pkg_id, constraint in all_direct do
+      queue.push({ "id": pkg_id, "constraint": constraint })
+    end
+
+    visited = {}
+
+    # BFS: expand transitive dependencies
+    i = 0
+    while i < queue.size() do
+      entry = queue[i]
+      i += 1
+
+      pkg_id = entry["id"]
+      constraint = entry["constraint"]
+
+      # Record this constraint
+      if !constraints_map.has_key(pkg_id)
+        constraints_map[pkg_id] = []
+      end
+      existing = constraints_map[pkg_id]
+      existing.push(constraint)
+      constraints_map[pkg_id] = existing
+
+      # Only expand transitive deps once per package
+      next when visited.has_key(pkg_id)
+      visited[pkg_id] = true
+
+      # Fetch available versions (cached inline)
+      versions = []
+      if version_cache.has_key(pkg_id)
+        versions = version_cache[pkg_id]
+      else
+        versions = fetcher::get_versions(pkg_id)
+        version_cache[pkg_id] = versions
+      end
+
+      if versions.empty()
+        throw "No releases found for package: ${pkg_id}"
+      end
+
+      # Pick a candidate version to inspect transitive deps
+      candidate = semver::max_satisfying(versions, [constraint])
+      if candidate == null
+        throw "No version of ${pkg_id} satisfies '${constraint}'"
+      end
+
+      # Fetch that package's manifest for its own dependencies
+      pkg_mfst = fetcher::get_package_manifest(pkg_id, candidate)
+
+      # Enqueue transitive dependencies (skip dev deps of dependencies)
+      for dep_id, dep_constraint in pkg_mfst["dependencies"] do
+        queue.push({ "id": dep_id, "constraint": dep_constraint })
+      end
+    end
+
+    # Unified resolution: for each package, find highest version satisfying ALL constraints
+    resolved = {}
+    for pkg_id, pkg_constraints in constraints_map do
+      versions = []
+      if version_cache.has_key(pkg_id)
+        versions = version_cache[pkg_id]
+      else
+        versions = fetcher::get_versions(pkg_id)
+        version_cache[pkg_id] = versions
+      end
+
+      best = semver::max_satisfying(versions, pkg_constraints)
+
+      if best == null
+        sorted = semver::sort_desc(versions)
+        available = sorted.size() > 5 ? sorted[0 : 5] : sorted
+        constraint_str = pkg_constraints.join(" AND ")
+        avail_str = available.join(", ")
+        throw "Version conflict for ${pkg_id}:\n  Required: ${constraint_str}\n  Available: ${avail_str}\n  No single version satisfies all constraints."
+      end
+
+      resolved[pkg_id] = best
+    end
+
+    resolved
+  end
+end
+
+export "resolver"
