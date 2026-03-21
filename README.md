@@ -1,4 +1,4 @@
-# Zest
+# Zest 🥝
 
 Package manager for the [Kiwi Programming Language](https://github.com/fuseraft/kiwi).
 
