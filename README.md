@@ -6,16 +6,41 @@ Zest lets you install external Kiwi packages from GitHub, manage dependencies, a
 
 ## Installation
 
-Clone the repo and add the `zest` wrapper to your PATH:
+### Linux / macOS
 
 ```bash
-git clone https://github.com/your-org/zest
-ln -s "$(pwd)/zest/zest" ~/.local/bin/zest
+curl -sSL https://raw.githubusercontent.com/fuseraft/zest/main/install.sh | bash
 ```
 
-Requires `kiwi` to be available in your PATH.
+Or with options:
 
-Set `GITHUB_TOKEN` in your environment to avoid GitHub API rate limits (60 req/hr unauthenticated → 5,000 req/hr authenticated):
+```bash
+./install.sh            # user install  (~/.zest)
+./install.sh --system   # system-wide   (/opt/zest, requires sudo)
+./install.sh --update   # update to latest
+./install.sh --help     # all options
+```
+
+### Windows
+
+```powershell
+irm https://raw.githubusercontent.com/fuseraft/zest/main/install.ps1 | iex
+```
+
+Or with options:
+
+```powershell
+.\install.ps1           # user install  (%LOCALAPPDATA%\zest)
+.\install.ps1 -System   # system-wide   (%ProgramFiles%\zest, auto-elevates)
+.\install.ps1 -Update   # update to latest
+.\install.ps1 -Uninstall
+```
+
+Requires [Kiwi](https://github.com/fuseraft/kiwi) to be installed and available in your PATH.
+
+### GitHub API rate limits
+
+Set `GITHUB_TOKEN` in your environment to raise the rate limit from 60 to 5,000 requests/hr:
 
 ```bash
 export GITHUB_TOKEN=ghp_your_token_here
