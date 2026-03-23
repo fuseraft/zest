@@ -171,12 +171,16 @@ package cmd_publish
   end
 
   /#
-  @summary Automatically fork the registry, add the entry, and open a PR.
+  @summary Automatically register a package in the community registry and open a PR.
+  If the user owns the registry, pushes directly to a new branch.
+  Otherwise, forks the registry and PRs from the fork.
   Falls back to printing manual instructions on any failure.
   #/
   fn _auto_register(pkg_id: string, description: string, mfst: hashmap, token: string)
-    REGISTRY    = "fuseraft/zest-registry"
-    REGISTRY_FILE = "packages.json"
+    REGISTRY       = "fuseraft/zest-registry"
+    REGISTRY_OWNER = "fuseraft"
+    REGISTRY_FILE  = "packages.json"
+    PR_BODY        = "## Register a Package\n\n**Package:** `${pkg_id}`\n\n### Checklist\n\n- [x] I am the author or maintainer of this package.\n- [x] The repository is public on GitHub.\n- [x] The repository contains a valid `kiwi.json` at the root.\n- [x] The repository has at least one tagged release.\n- [x] The description is clear and under 120 characters.\n- [x] Tags are lowercase and relevant.\n"
 
     headers = {
       "Accept":        "application/vnd.github+json",
@@ -194,21 +198,52 @@ package cmd_publish
       return null
     end
     user_data  = cmd_publish::_parse_body(user_raw)
-    fork_owner = user_data["login"]
+    login      = user_data["login"]
+    is_owner   = login == REGISTRY_OWNER
 
-    # Step 2: Fork the registry (idempotent — returns existing fork if already forked)
-    cli::info("Forking registry...")
-    fork_resp = http::await_post("https://api.github.com/repos/${REGISTRY}/forks", {}, headers)
-    fork_raw  = fork_resp.get_raw()
-    if fork_raw["status"] != 202 && fork_raw["status"] != 200
-      cli::warn("Could not fork registry (HTTP ${fork_raw["status"]}). Falling back to manual instructions.")
-      cmd_publish::_print_register(pkg_id, description, mfst)
-      return null
+    # Step 2a (owner): create a branch directly on the registry repo
+    # Step 2b (others): fork the registry
+    source_repo = REGISTRY
+    pr_head     = ""
+
+    if is_owner
+      branch_name = "register/" + pkg_id.replace("/", "-")
+      cli::info("Creating branch ${branch_name}...")
+
+      ref_resp = http::await_get("https://api.github.com/repos/${REGISTRY}/git/ref/heads/main", headers)
+      ref_raw  = ref_resp.get_raw()
+      if ref_raw["status"] != 200
+        cli::warn("Could not read main branch (HTTP ${ref_raw["status"]}). Falling back to manual instructions.")
+        cmd_publish::_print_register(pkg_id, description, mfst)
+        return null
+      end
+      main_sha = cmd_publish::_parse_body(ref_raw)["object"]["sha"]
+
+      br_resp = http::await_post("https://api.github.com/repos/${REGISTRY}/git/refs", { "ref": "refs/heads/${branch_name}", "sha": main_sha }, headers)
+      br_raw  = br_resp.get_raw()
+      if br_raw["status"] != 201
+        cli::warn("Could not create branch (HTTP ${br_raw["status"]}). Falling back to manual instructions.")
+        cmd_publish::_print_register(pkg_id, description, mfst)
+        return null
+      end
+
+      pr_head = branch_name
+    else
+      cli::info("Forking registry...")
+      fork_resp = http::await_post("https://api.github.com/repos/${REGISTRY}/forks", {}, headers)
+      fork_raw  = fork_resp.get_raw()
+      if fork_raw["status"] != 202 && fork_raw["status"] != 200
+        cli::warn("Could not fork registry (HTTP ${fork_raw["status"]}). Falling back to manual instructions.")
+        cmd_publish::_print_register(pkg_id, description, mfst)
+        return null
+      end
+      source_repo = "${login}/zest-registry"
+      pr_head     = "${login}:main"
     end
 
-    # Step 3: Fetch packages.json from the fork (retry up to 5x — fork may not be ready yet)
+    # Step 3: Fetch packages.json (with retries for freshly created forks)
     cli::info("Fetching packages.json...")
-    file_url = "https://api.github.com/repos/${fork_owner}/zest-registry/contents/${REGISTRY_FILE}"
+    file_url = "https://api.github.com/repos/${source_repo}/contents/${REGISTRY_FILE}"
     file_raw = { "status": 0 }
     for i in [0 to 4] do
       file_resp = http::await_get(file_url, headers)
@@ -218,7 +253,7 @@ package cmd_publish
     end
 
     if file_raw["status"] != 200
-      cli::warn("Fork not ready after retries. Falling back to manual instructions.")
+      cli::warn("Could not fetch packages.json after retries. Falling back to manual instructions.")
       cmd_publish::_print_register(pkg_id, description, mfst)
       return null
     end
@@ -242,35 +277,26 @@ package cmd_publish
 
     updated_b64 = encode::base64_encode(json::stringify(registry, true))
 
-    # Step 5: Push updated file to fork
-    cli::info("Pushing update to fork...")
-    put_body = {
-      "message": "Register ${pkg_id}",
-      "content": updated_b64,
-      "sha":     sha
-    }
+    # Step 5: Push updated file
+    cli::info("Pushing update...")
+    put_body = { "message": "Register ${pkg_id}", "content": updated_b64, "sha": sha }
+    put_body["branch"] = pr_head when is_owner
     put_task = http::put(file_url, put_body, headers)
     put_raw  = await(put_task)
 
     if put_raw["status"] != 200 && put_raw["status"] != 201
-      cli::warn("Could not push to fork (HTTP ${put_raw["status"]}). Falling back to manual instructions.")
+      cli::warn("Could not push update (HTTP ${put_raw["status"]}). Falling back to manual instructions.")
       cmd_publish::_print_register(pkg_id, description, mfst)
       return null
     end
 
-    # Step 6: Open a PR against fuseraft/zest-registry
+    # Step 6: Open PR
     cli::info("Opening pull request...")
-    pr_body = {
-      "title": "Register ${pkg_id}",
-      "head":  "${fork_owner}:main",
-      "base":  "main",
-      "body":  "## Register a Package\n\n**Package:** \`${pkg_id}\`\n\n### Checklist\n\n- [x] I am the author or maintainer of this package.\n- [x] The repository is public on GitHub.\n- [x] The repository contains a valid `kiwi.json` at the root.\n- [x] The repository has at least one tagged release.\n- [x] The description is clear, concise, and under 120 characters.\n- [x] Tags are lowercase and relevant.\n"
-    }
-    pr_resp = http::await_post("https://api.github.com/repos/${REGISTRY}/pulls", pr_body, headers)
+    pr_resp = http::await_post("https://api.github.com/repos/${REGISTRY}/pulls", { "title": "Register ${pkg_id}", "head": pr_head, "base": "main", "body": PR_BODY }, headers)
     pr_raw  = pr_resp.get_raw()
 
     if pr_raw["status"] != 201
-      cli::warn("PR creation failed (HTTP ${pr_raw["status"]}). Your fork is updated — open the PR manually at https://github.com/${fork_owner}/zest-registry.")
+      cli::warn("PR creation failed (HTTP ${pr_raw["status"]}). Branch is ready — open the PR manually at https://github.com/${REGISTRY}/compare/${pr_head}")
       return null
     end
 
