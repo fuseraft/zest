@@ -159,6 +159,34 @@ zest info owner/repo
 
 ---
 
+### `zest search`
+Search the [community registry](https://github.com/fuseraft/zest-registry) for packages.
+
+```bash
+zest search              # list all registered packages
+zest search colors       # filter by name, description, or tag
+```
+
+---
+
+### `zest publish`
+Tag the current version and create a GitHub release. Requires `GITHUB_TOKEN`.
+
+```bash
+zest publish             # tag + release using the version in kiwi.json
+zest publish --patch     # bump patch version, then tag + release
+zest publish --minor     # bump minor version, then tag + release
+zest publish --major     # bump major version, then tag + release
+```
+
+Add `--register` to any of the above to print the `packages.json` entry and step-by-step instructions for submitting your package to the community registry:
+
+```bash
+zest publish --patch --register
+```
+
+---
+
 ### `zest cache clean`
 Delete all cached tarballs from `~/.zest/cache/`. Installed packages in `~/.zest/packages/` are unaffected.
 
@@ -251,9 +279,9 @@ This means there is always exactly **one copy** of each package installed per pr
 
 ## Publishing a Package
 
-To make your Kiwi project installable via Zest:
+### 1. Set up your package
 
-1. Add a `kiwi.json` to the root of your GitHub repo:
+Add a `kiwi.json` to the root of your GitHub repo:
 
 ```json
 {
@@ -261,13 +289,12 @@ To make your Kiwi project installable via Zest:
   "version": "1.0.0",
   "description": "A useful Kiwi package",
   "main": "my_package.kiwi",
-  "dependencies": {
-    "owner/some-dep": "^1.0.0"
-  }
+  "kiwi": ">=1.4.0",
+  "dependencies": {}
 }
 ```
 
-2. Define your package in the main file using Kiwi's `package` syntax:
+Define your package in the main file using Kiwi's `package` syntax:
 
 ```kiwi
 package my_package
@@ -279,14 +306,33 @@ end
 export "my_package"
 ```
 
-3. Create a GitHub release with a semver tag (`v1.0.0`).
+### 2. Publish a release
 
-Users can then install your package with:
+With `GITHUB_TOKEN` set, run from your repo directory:
+
+```bash
+zest publish          # tags + releases the current version
+zest publish --patch  # bumps patch, commits kiwi.json, tags, releases
+```
+
+This creates a git tag (`v1.0.0`) and a GitHub release — making the package installable immediately:
+
 ```bash
 zest install your-username/my-package
 ```
 
-And use it as:
+### 3. Register in the community registry
+
+To make your package discoverable via `zest search`, submit it to [fuseraft/zest-registry](https://github.com/fuseraft/zest-registry):
+
+```bash
+zest publish --register   # prints the entry + PR instructions
+```
+
+Or add the entry manually to `packages.json` and open a pull request.
+
+### 4. Using an installed package
+
 ```kiwi
 include ".zest/load.kiwi"
 
@@ -314,9 +360,23 @@ Multiple projects sharing the same package version share the same installation o
 
 ---
 
+## Community Registry
+
+The [Zest Registry](https://github.com/fuseraft/zest-registry) is a community-maintained index of Kiwi packages. It's a single `packages.json` file hosted on GitHub — no account, no central server.
+
+```bash
+zest search              # browse all registered packages
+zest search http         # filter by name, description, or tag
+zest install owner/repo  # install any package directly (registry not required)
+```
+
+To register your package, see [fuseraft/zest-registry](https://github.com/fuseraft/zest-registry) for the submission guide.
+
+---
+
 ## Environment Variables
 
 | Variable | Description |
 |----------|-------------|
-| `GITHUB_TOKEN` | GitHub personal access token. Raises API rate limit from 60 to 5,000 requests/hr. Required for heavy use. |
+| `GITHUB_TOKEN` | GitHub personal access token. Required for `zest publish`. Raises API rate limit from 60 to 5,000 requests/hr for all other commands. |
 | `ZEST_HOME` | Set automatically by the `zest` wrapper. Points to the zest installation directory. |
