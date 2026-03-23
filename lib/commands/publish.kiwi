@@ -1,0 +1,200 @@
+/#
+@summary Publish a Kiwi package to GitHub as a versioned release.
+Requires GITHUB_TOKEN to be set in the environment.
+#/
+package cmd_publish
+  fn run(targets: list, flags: hashmap)
+    if !manifest::exists()
+      cli::error("No kiwi.json found. Run `zest init` first.")
+      return null
+    end
+
+    token = env::get("GITHUB_TOKEN")
+    if token == ""
+      cli::error("GITHUB_TOKEN is required to create GitHub releases.")
+      cli::info("Set it with: export GITHUB_TOKEN=your_token")
+      return null
+    end
+
+    mfst        = manifest::load()
+    name        = mfst["name"]
+    version     = mfst["version"]
+    description = mfst["description"]
+
+    if version == ""
+      cli::error("kiwi.json is missing a 'version' field.")
+      return null
+    end
+
+    # Optional version bump
+    if flags["major"]
+      version = cmd_publish::_bump(version, "major")
+    elsif flags["minor"]
+      version = cmd_publish::_bump(version, "minor")
+    elsif flags["patch"]
+      version = cmd_publish::_bump(version, "patch")
+    end
+
+    tag = "v${version}"
+
+    # Derive owner/repo from git remote
+    pkg_id = ""
+    try
+      pkg_id = cmd_publish::_remote_id()
+    catch (e, m)
+      cli::error(m)
+      return null
+    end
+
+    # Ensure working tree is clean
+    status = sys::execout("git", ["status", "--porcelain"])
+    if status["exit_code"] != 0
+      cli::error("Failed to run git status.")
+      return null
+    end
+
+    bump_requested = flags["major"] || flags["minor"] || flags["patch"]
+
+    if status["stdout"].trim() != "" && !bump_requested
+      cli::error("Working tree is not clean. Commit or stash your changes first.")
+      return null
+    end
+
+    # Check tag does not already exist
+    tag_check = sys::execout("git", ["tag", "-l", tag])
+    if tag_check["stdout"].trim() != ""
+      cli::error("Tag ${tag} already exists.")
+      return null
+    end
+
+    # Commit the version bump if requested
+    if bump_requested
+      mfst["version"] = version
+      manifest::save(mfst)
+      sys::exec("git", ["add", "kiwi.json"])
+      sys::exec("git", ["commit", "-m", "chore: bump version to ${version}"])
+      cli::success("Bumped version to ${version}")
+    end
+
+    cli::header("Publishing ${name} ${tag}")
+
+    # Create and push the tag
+    cli::info("Creating tag ${tag}...")
+    if sys::exec("git", ["tag", tag]) != 0
+      cli::error("Failed to create tag ${tag}.")
+      return null
+    end
+
+    cli::info("Pushing tag to origin...")
+    if sys::exec("git", ["push", "origin", tag]) != 0
+      cli::error("Failed to push tag to origin.")
+      return null
+    end
+
+    # Create the GitHub release
+    cli::info("Creating GitHub release...")
+
+    parts = pkg_id.split("/")
+    owner = parts[0]
+    repo  = parts[1]
+
+    url     = "https://api.github.com/repos/${owner}/${repo}/releases"
+    headers = {
+      "Accept":        "application/vnd.github+json",
+      "User-Agent":    "zest/1.0 kiwi-package-manager",
+      "Authorization": "token ${token}"
+    }
+    body = {
+      "tag_name":         tag,
+      "name":             tag,
+      "body":             "Release ${tag}",
+      "draft":            false,
+      "prerelease":       false
+    }
+
+    resp = http::await_post(url, body, headers)
+
+    raw = resp.get_raw()
+    if raw["status"] != 201
+      cli::error("GitHub API error (HTTP ${raw["status"]}).")
+      cli::info("Response: ${raw["body"]}")
+      return null
+    end
+
+    release = raw["body"]
+    release = json::parse(release) when typeof(release) == string
+    cli::success("Published ${name} ${tag}")
+    println ""
+    println "  ${release["html_url"]}"
+    println ""
+
+    cmd_publish::_print_register(pkg_id, description, mfst) when flags["register"]
+  end
+
+  /#
+  @summary Bump a semver string by the given part.
+  @param string version : Current version (e.g. "1.2.3").
+  @param string part    : One of "major", "minor", "patch".
+  @return string : The bumped version.
+  #/
+  fn _bump(version: string, part: string): string
+    parsed = semver::parse(version)
+    major  = parsed["major"]
+    minor  = parsed["minor"]
+    patch  = parsed["patch"]
+
+    if part == "major"
+      major += 1
+      minor = 0
+      patch = 0
+    elsif part == "minor"
+      minor += 1
+      patch = 0
+    else
+      patch += 1
+    end
+
+    "${major}.${minor}.${patch}"
+  end
+
+  /#
+  @summary Derive an "owner/repo" identifier from the git remote origin URL.
+  @return string : Normalized "owner/repo" string.
+  @throws string : If the remote cannot be read or parsed.
+  #/
+  fn _remote_id(): string
+    result = sys::execout("git", ["remote", "get-url", "origin"])
+    if result["exit_code"] != 0
+      throw "Could not read git remote 'origin'. Is this a git repository with a remote?"
+    end
+    fetcher::normalize_id(result["stdout"].trim())
+  end
+
+  /#
+  @summary Print registry entry instructions for --register.
+  #/
+  fn _print_register(pkg_id: string, description: string, mfst: hashmap)
+    kiwi_req = mfst["kiwi"] ?? ""
+
+    entry = { "description": description, "tags": [] }
+    entry["kiwi"] = kiwi_req when kiwi_req != ""
+
+    wrapper = {}
+    wrapper[pkg_id] = entry
+    snippet = json::stringify(wrapper, true)
+
+    println "To register in the community registry:"
+    println ""
+    println "  1. Fork https://github.com/fuseraft/zest-registry"
+    println "  2. Add to packages.json:"
+    println ""
+    for line in snippet.split("\n") do
+      println "     ${line}"
+    end
+    println ""
+    println "  3. Open a pull request."
+    println ""
+  end
+end
+
+export "cmd_publish"

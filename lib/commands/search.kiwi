@@ -1,0 +1,83 @@
+/#
+@summary Search the Zest community registry for packages.
+#/
+package cmd_search
+  REGISTRY_URL = "https://raw.githubusercontent.com/fuseraft/zest-registry/main/packages.json"
+
+  fn run(targets: list, flags: hashmap)
+    query = targets.empty() ? "" : string::to_lower(targets.join(" ").trim())
+
+    cli::info("Fetching registry...")
+
+    headers = { "User-Agent": "zest/1.0 kiwi-package-manager" }
+    token   = env::get("GITHUB_TOKEN")
+    if token != ""
+      headers["Authorization"] = "token ${token}"
+    end
+
+    resp = http::get(cmd_search::REGISTRY_URL, headers)
+
+    raw = resp.get_raw()
+    if raw["status"] != 200
+      cli::error("Failed to fetch registry (HTTP ${raw["status"]}).")
+      return null
+    end
+
+    registry = {}
+    try
+      registry = json::parse(raw["body"])
+    catch (e, m)
+      cli::error("Failed to parse registry: ${m}")
+      return null
+    end
+
+    results = []
+
+    for pkg_id, entry in registry do
+      next when pkg_id.begins_with("_")
+      next when typeof(entry) != hashmap
+
+      desc = entry["description"] ?? ""
+      tags = entry["tags"] ?? []
+
+      if query == ""
+        results.push({ "id": pkg_id, "description": desc, "tags": tags })
+        next
+      end
+
+      tag_match = tags.join(" ").contains(query)
+      matched = string::to_lower(pkg_id).contains(query) || string::to_lower(desc).contains(query) || tag_match
+
+      if matched
+        results.push({ "id": pkg_id, "description": desc, "tags": tags })
+      end
+    end
+
+    if results.empty()
+      if query == ""
+        cli::warn("The registry is empty.")
+      else
+        cli::warn("No packages found matching '${query}'.")
+      end
+      return null
+    end
+
+    label = query == "" ? "All packages in the registry" : "Results for '${query}'"
+    cli::header("${label} (${results.size()})")
+
+    for r in results do
+      cli::kv("  ${r["id"]}", r["description"], 44)
+      if !r["tags"].empty()
+        console::fg("DARK_GRAY")
+        println "    ${r["tags"].join("  ")}"
+        console::reset()
+      end
+    end
+
+    println ""
+    println "Install a package with: zest install owner/repo"
+    println ""
+  end
+end
+
+export "cmd_search"
