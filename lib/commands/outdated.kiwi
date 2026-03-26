@@ -1,0 +1,104 @@
+package cmd_outdated
+  /#
+  @summary List installed packages with newer versions available on GitHub.
+  Shows only direct dependencies from kiwi.json by default.
+  #/
+  fn run(targets: list, flags: hashmap)
+    if !manifest::exists()
+      cli::error("No kiwi.json found. Run `zest init` first.")
+      return null
+    end
+
+    mfst      = manifest::load()
+    lock_data = lockfile::load()
+    pkgs      = lock_data["packages"]
+
+    direct_deps = mfst["dependencies"]
+    dev_deps    = mfst["dev_dependencies"]
+
+    if direct_deps.empty() && dev_deps.empty()
+      println "No direct dependencies declared."
+      return null
+    end
+
+    cli::header("Outdated packages")
+
+    outdated_deps    = []
+    outdated_devdeps = []
+
+    # Check regular dependencies
+    for pkg_id, constraint in direct_deps do
+      entry = lockfile::get(lock_data, pkg_id)
+      if entry != null
+        installed = entry["version"]
+        if cmd_outdated::_is_outdated(pkg_id, installed, constraint)
+          outdated_deps.push({ "id": pkg_id, "installed": installed, "constraint": constraint })
+        end
+      end
+    end
+
+    # Check dev dependencies
+    for pkg_id, constraint in dev_deps do
+      entry = lockfile::get(lock_data, pkg_id)
+      if entry != null
+        installed = entry["version"]
+        if cmd_outdated::_is_outdated(pkg_id, installed, constraint)
+          outdated_devdeps.push({ "id": pkg_id, "installed": installed, "constraint": constraint })
+        end
+      end
+    end
+
+    if outdated_deps.empty() && outdated_devdeps.empty()
+      cli::success("All direct dependencies up to date!")
+      return null
+    end
+
+    # Show outdated regular deps
+    if !outdated_deps.empty()
+      println "\nDependencies:"
+      for pkg in outdated_deps do
+        latest = cmd_outdated::_latest_satisfying(pkg["id"], pkg["constraint"])
+        cli::kv("  ! ${pkg["id"]}", "${pkg["installed"]} → ${latest} (${pkg["constraint"]})", 44)
+      end
+    end
+
+    # Show outdated dev deps
+    if !outdated_devdeps.empty()
+      println "\nDev dependencies:"
+      for pkg in outdated_devdeps do
+        latest = cmd_outdated::_latest_satisfying(pkg["id"], pkg["constraint"])
+        cli::kv("  ! ${pkg["id"]}", "${pkg["installed"]} → ${latest} (${pkg["constraint"]})", 44)
+      end
+    end
+
+    println ""
+    cli::info("Run `zest update` to update.")
+  end
+
+  fn _is_outdated(pkg_id: string, installed: string, constraint: string): boolean
+    versions = []
+    try
+      versions = fetcher::get_versions(pkg_id)
+    catch
+      return false  # Silently skip packages we can't fetch (e.g. network error)
+    end
+
+    if versions.empty()
+      return false
+    end
+
+    latest_satisfying = semver::max_satisfying(versions, [constraint])
+    if latest_satisfying == null
+      return false
+    end
+
+    semver::compare(latest_satisfying, installed) > 0
+  end
+
+  fn _latest_satisfying(pkg_id: string, constraint: string): string
+    versions = fetcher::get_versions(pkg_id)
+    semver::max_satisfying(versions, [constraint])
+  end
+end
+
+export "cmd_outdated"
