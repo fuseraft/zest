@@ -87,17 +87,18 @@ package cmd_outdated
       return false
     end
 
-    latest_satisfying = semver::max_satisfying(versions, [constraint])
-    if latest_satisfying == null
+    sorted = semver::sort_desc(versions)
+    if sorted.empty()
       return false
     end
 
-    semver::compare(latest_satisfying, installed) > 0
+    semver::compare(sorted.first(), installed) > 0
   end
 
   fn _latest_satisfying(pkg_id: string, constraint: string): string
     versions = fetcher::get_versions(pkg_id)
-    semver::max_satisfying(versions, [constraint])
+    sorted = semver::sort_desc(versions)
+    sorted.empty() ? null : sorted.first()
   end
 end
 

@@ -51,6 +51,11 @@ package fetcher
       at_pos = s.index("@")
       constraint = s.substring(at_pos + 1, s.size() - at_pos - 1)
       s = s.substring(0, at_pos)
+      # Bare version like "1.2.3" → "^1.2.3" so outdated/update can find newer compatible versions
+      is_operator = constraint.begins_with("^") || constraint.begins_with("~") ||
+                    constraint.begins_with(">") || constraint.begins_with("<") ||
+                    constraint.begins_with("*") || constraint == "latest" || constraint.contains(",")
+      constraint = "^${constraint}" when !is_operator
     end
 
     { "id": fetcher::normalize_id(s), "constraint": constraint }
