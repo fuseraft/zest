@@ -112,6 +112,9 @@ package cmd_list
     sha_short = entry["sha256"] != "" ? entry["sha256"].substring(0, 16) + "..." : "(unknown)"
     cli::kv("SHA256",       sha_short)
     cli::kv("Resolved",     entry["resolved"])
+    if entry.has_key("native")
+      cli::kv("Native",       "${entry["native"]["name"]} (${entry["native"]["binaries"].keys().sort().join(", ")})")
+    end
 
     deps = entry["dependencies"]
     if !deps.empty()

@@ -57,9 +57,10 @@ package lockfile
   @param string sha256 : Checksum of the downloaded tarball.
   @param string main_file : Relative path to the package's main .kiwi file.
   @param hashmap deps : Direct dependency versions { pkg_id => version }.
+  @param hashmap native_ext : The package's native extension, from lockfile::native_entry, or null.
   @return hashmap : Updated lock data.
   #/
-  fn pin(data: hashmap, pkg_id: string, version: string, resolved_url: string, sha256: string, main_file: string, deps: hashmap): hashmap
+  fn pin(data: hashmap, pkg_id: string, version: string, resolved_url: string, sha256: string, main_file: string, deps: hashmap, native_ext = null): hashmap
     entry = {
       "version": version,
       "resolved": resolved_url,
@@ -67,10 +68,38 @@ package lockfile
       "main": main_file,
       "dependencies": deps
     }
+    entry["native"] = native_ext when native_ext != null
     pkgs = data["packages"]
     pkgs[pkg_id] = entry
     data["packages"] = pkgs
     data
+  end
+
+  /#
+  @summary Build the lock entry for a package's native extension. The lock is shared by every
+  platform the project is installed on, so it keeps a binary per platform: the one just
+  installed, and those already locked for the same version.
+  @param hashmap installed : The binary fetcher::install_native returned.
+  @param hashmap locked : The binaries already locked for this version, by platform.
+  @return hashmap : { "name": extension name, "binaries": { rid => { "file", "sha256", "resolved" } } }
+  #/
+  fn native_entry(installed: hashmap, locked: hashmap = {}): hashmap
+    binaries = locked.clone()
+    binaries[installed["rid"]] = { "file": installed["file"], "sha256": installed["sha256"], "resolved": installed["resolved"] }
+    { "name": installed["name"], "binaries": binaries }
+  end
+
+  /#
+  @summary Get the native binaries locked for a package version, by platform.
+  @param hashmap data : Lock data.
+  @param string pkg_id : Package ID.
+  @param string version : The version being installed. Binaries locked for another version don't apply.
+  @return hashmap : { rid => { "file", "sha256", "resolved" } }, empty if none are locked.
+  #/
+  fn native_binaries(data: hashmap, pkg_id: string, version: string): hashmap
+    entry = lockfile::get(data, pkg_id)
+    return {} when entry == null || entry["version"] != version || !entry.has_key("native")
+    entry["native"]["binaries"]
   end
 
   /#
