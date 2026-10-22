@@ -1,0 +1,138 @@
+# Offline tests: resolution, lock rebuilding and helpers, with GitHub replaced by a fake
+# package source. Run from the repository root: kiwi tests/unit.kiwi
+var (zest_root: string = fio::cwd())
+include "${zest_root}/lib/semver.kiwi"
+include "${zest_root}/lib/manifest.kiwi"
+include "${zest_root}/lib/lockfile.kiwi"
+include "${zest_root}/lib/fetcher.kiwi"
+include "${zest_root}/lib/resolver.kiwi"
+include "${zest_root}/lib/loader.kiwi"
+include "${zest_root}/lib/commands/install.kiwi"
+include "${zest_root}/tests/harness.kiwi"
+
+# Fake packages: app -> lib (^1.0.0) -> core (~2.1.0), plus solo with no dependencies.
+var (fake_registry: hashmap = {
+  "o/app":  { "1.0.0": { "o/lib": "^1.0.0" }, "1.1.0": { "o/lib": "^1.0.0" } },
+  "o/lib":  { "1.0.0": { "o/core": "~2.1.0" }, "1.2.0": { "o/core": "~2.1.0" } },
+  "o/core": { "2.1.0": {}, "2.1.5": {}, "2.2.0": {} },
+  "o/solo": { "0.3.0": {} }
+})
+
+# Replace the network-facing fetcher functions with the fake package source.
+package fetcher
+  fn get_versions(pkg_id: string): list
+    fake_registry[pkg_id].keys()
+  end
+
+  fn get_package_manifest(pkg_id: string, version: string): hashmap
+    { "name": pkg_id, "version": version, "dependencies": fake_registry[pkg_id][version], "dev_dependencies": {} }
+  end
+
+  fn install(pkg_id: string, version: string, expected_sha256: string = ""): hashmap
+    { "path": "/fake", "sha256": "sha-${pkg_id}-${version}", "main": "main.kiwi", "resolved": "url-${pkg_id}-${version}" }
+  end
+end
+
+var (app_manifest: hashmap = { "dependencies": { "o/app": "^1.0.0", "o/solo": "*" }, "dev_dependencies": {} })
+var (old_lock_versions: hashmap = { "o/app": "1.0.0", "o/lib": "1.0.0", "o/core": "2.1.0" })
+
+@tester::test("resolver: picks the highest satisfying versions without a lock")
+fn test_resolve_fresh()
+  r = resolver::resolve(app_manifest)
+  tester::assert_eq([r["o/app"], r["o/lib"], r["o/core"], r["o/solo"]], ["1.1.0", "1.2.0", "2.1.5", "0.3.0"])
+end
+
+@tester::test("resolver: keeps locked versions that still satisfy")
+fn test_resolve_locked()
+  r = resolver::resolve(app_manifest, true, old_lock_versions)
+  tester::assert_eq([r["o/app"], r["o/lib"], r["o/core"]], ["1.0.0", "1.0.0", "2.1.0"])
+end
+
+@tester::test("resolver: replaces a locked version that no longer satisfies")
+fn test_resolve_locked_unsatisfied()
+  r = resolver::resolve(app_manifest, true, { "o/core": "2.2.0" })
+  tester::assert_eq(r["o/core"], "2.1.5")
+end
+
+@tester::test("resolver: replaces a locked version that no longer exists")
+fn test_resolve_locked_missing()
+  r = resolver::resolve(app_manifest, true, { "o/core": "2.1.3" })
+  tester::assert_eq(r["o/core"], "2.1.5")
+end
+
+@tester::test("resolver: reports conflicting constraints")
+fn test_resolve_conflict()
+  conflicting = { "dependencies": { "o/app": "^1.0.0", "o/core": "^2.2.0" }, "dev_dependencies": {} }
+  message = ""
+  try
+    resolver::resolve(conflicting)
+  catch (kind, m)
+    message = m
+  end
+  tester::assert(message.contains("Version conflict for o/core"), "expected a conflict, got: ${message}")
+end
+
+@tester::test("semver: max_satisfying returns null when nothing matches")
+fn test_max_satisfying_none()
+  tester::assert_eq(semver::max_satisfying(["1.0.0"], ["^2.0.0"]), null)
+end
+
+@tester::test("install: the lock holds exactly the resolved packages")
+fn test_lock_rebuilt()
+  stale = { "lockfile_version": 1, "packages": { "o/gone": { "version": "9.9.9", "sha256": "x", "dependencies": {} } } }
+  lock  = cmd_install::_install_resolved(resolver::resolve(app_manifest, true, old_lock_versions), stale)
+  tester::assert_eq(lock["packages"].keys().sort(), ["o/app", "o/core", "o/lib", "o/solo"])
+end
+
+@tester::test("install: lock entries record their dependencies' versions and URLs")
+fn test_lock_entries()
+  lock = cmd_install::_install_resolved(resolver::resolve(app_manifest, true, old_lock_versions), lockfile::empty())
+  pkgs = lock["packages"]
+  tester::assert_eq(pkgs["o/app"]["dependencies"], { "o/lib": "1.0.0" })
+  tester::assert_eq(pkgs["o/lib"]["dependencies"], { "o/core": "2.1.0" })
+  tester::assert_eq(pkgs["o/core"]["resolved"], "url-o/core-2.1.0")
+  tester::assert_eq(pkgs["o/core"]["sha256"], "sha-o/core-2.1.0")
+end
+
+@tester::test("fetcher: finds the digest in each hashing tool's output")
+fn test_find_digest()
+  d      = "7abc3381e40308213b197b73859f6b4e0efc4c84f1b2c4118a1fd81f78c8f317"
+  spaced = "7a bc 33 81 e4 03 08 21 3b 19 7b 73 85 9f 6b 4e 0e fc 4c 84 f1 b2 c4 11 8a 1f d8 1f 78 c8 f3 17"
+  tester::assert_eq(fetcher::_find_digest("${d}  /tmp/file.tar.gz\n"), d, "sha256sum / shasum")
+  tester::assert_eq(fetcher::_find_digest("SHA256 hash of C:\\f.tar.gz:\r\n${d}\r\nCertUtil: -hashfile command completed successfully.\r\n"), d, "certutil")
+  tester::assert_eq(fetcher::_find_digest("SHA256 hash of file C:\\f.tar.gz:\r\n${spaced.uppercase()}\r\nCertUtil: -hashfile command completed successfully.\r\n"), d, "older certutil")
+  tester::assert_eq(fetcher::_find_digest("error: no such file\n"), "", "no digest")
+end
+
+@tester::test("fetcher: hashes a file with the platform's tool")
+fn test_sha256_file()
+  path = fio::combine([fio::tmpdir(), "zest_unit_${sys::pid()}.txt"])
+  fio::write(path, "abc")
+  digest = fetcher::sha256(path)
+  fio::remove(path)
+  tester::assert_eq(digest, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+end
+
+@tester::test("fetcher: tarball URLs with and without a v prefix")
+fn test_tarball_url()
+  tester::assert_eq(fetcher::tarball_url("o/r", "1.2.3"), "https://github.com/o/r/archive/refs/tags/v1.2.3.tar.gz")
+  tester::assert_eq(fetcher::tarball_url("o/r", "1.2.3", false), "https://github.com/o/r/archive/refs/tags/1.2.3.tar.gz")
+end
+
+@tester::test("loader: quoted paths read back unchanged")
+fn test_quote_round_trip()
+  opener = "$" + "{"
+  paths = [
+    "C:\\Users\\nina\\.zest\\packages\\tools\\1.0.0\\main.kiwi",
+    "/home/a b/x\"y/${opener}z}/$HOME/main.kiwi"
+  ]
+  script = fio::combine([fio::tmpdir(), "zest_quote_${sys::pid()}.kiwi"])
+  for p in paths do
+    fio::write(script, "println " + loader::_quote(p))
+    out = sys::execout(env::bin(), [script])["stdout"].trim()
+    tester::assert_eq(out, p)
+  end
+  fio::remove(script)
+end
+
+run_zest_tests("Zest unit tests")

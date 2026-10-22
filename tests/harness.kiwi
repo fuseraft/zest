@@ -1,0 +1,17 @@
+# Shared test runner: runs every @tester::test in the including script, prints a summary,
+# and exits with status 1 if any test failed.
+fn run_zest_tests(title: string)
+  println "${title}\n"
+
+  results   = tester::run_tests()
+  failed    = results.filter(with (r) do return !r.result end).size()
+  succeeded = results.size() - failed
+
+  println ""
+  if failed == 0
+    println "All ${results.size()} tests passed."
+  else
+    println "${succeeded} tests passed, ${failed} tests failed."
+    exit 1
+  end
+end

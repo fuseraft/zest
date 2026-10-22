@@ -376,6 +376,19 @@ To register your package, see [fuseraft/zest-registry](https://github.com/fusera
 
 ---
 
+## Running the Tests
+
+From the repository root:
+
+```bash
+kiwi tests/unit.kiwi   # offline: resolution, kiwi.lock and helpers
+kiwi tests/e2e.kiwi    # installs real packages from GitHub into temporary directories
+```
+
+The end-to-end tests use their own home directory, so they don't touch `~/.zest`. Set `GITHUB_TOKEN` to avoid API rate limits. CI runs both on Linux, macOS and Windows against the latest Kiwi release.
+
+---
+
 ## Environment Variables
 
 | Variable | Description |

@@ -1,0 +1,60 @@
+name: CI
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: macos-latest
+            rid: osx-arm64
+          - os: windows-latest
+            rid: win-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@v4
+
+    # Test against the Kiwi release users install.
+    - name: Find the latest Kiwi release
+      id: kiwi
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: echo "tag=$(gh release view --repo fuseraft/kiwi --json tagName --jq .tagName)" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/checkout@v4
+      with:
+        repository: fuseraft/kiwi
+        ref: ${{ steps.kiwi.outputs.tag }}
+        path: kiwi
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 10.0.x
+
+    # dotnet publish directly rather than Kiwi's build scripts: build.ps1 in Kiwi 1.6.1
+    # and earlier waits on leftover build servers for about 15 minutes on Windows.
+    - name: Build Kiwi ${{ steps.kiwi.outputs.tag }}
+      shell: bash
+      run: |
+        dotnet publish kiwi/src/kiwi.csproj -c Release -r ${{ matrix.rid }} --self-contained true \
+          --disable-build-servers -p:PublishAot=true -p:StripSymbols=true -p:DebugType=none \
+          -o kiwi/bin
+        echo "$GITHUB_WORKSPACE/kiwi/bin" >> "$GITHUB_PATH"
+
+    - name: Unit tests
+      run: kiwi tests/unit.kiwi
+
+    - name: End-to-end tests
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      run: kiwi tests/e2e.kiwi
