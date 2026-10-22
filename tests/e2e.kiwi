@@ -1,5 +1,6 @@
 # End-to-end tests: run zest against real packages on GitHub (fuseraft/humanize has
-# releases 0.1.0, 0.1.1 and 0.1.2). Each test uses its own project and home directory.
+# releases 0.1.0, 0.1.1 and 0.1.2, and fuseraft/zest-native-test 0.1.0 has a native extension
+# with release binaries for linux-x64, linux-arm64, osx-x64, osx-arm64 and win-x64). Each test uses its own project and home directory.
 # Run from the repository root: kiwi tests/e2e.kiwi. Set GITHUB_TOKEN to avoid rate limits.
 var (zest_root: string = fio::cwd())
 include "${zest_root}/tests/harness.kiwi"
@@ -152,6 +153,31 @@ fn test_uninstall()
   tester::assert_eq(lock_entry(sandbox, "fuseraft/slugify"), null)
   load = fio::read(fio::combine([sandbox["project"], ".zest", "load.kiwi"]))
   tester::assert(!load.contains("slugify"), load)
+end
+
+@tester::test("native: installs the binary for this platform and loads it")
+fn test_native_install()
+  sandbox = new_sandbox("native")
+  out = zest(sandbox, ["install", "fuseraft/zest-native-test@0.1.0"])
+  tester::assert(out.contains("Added fuseraft/zest-native-test@0.1.0"), out)
+  tester::assert_eq(run_with_packages(sandbox, "println zest_native_test::sum_squares(3, 4)\nprintln zest_native_test::platform()"), "25\n${native::rid()}")
+
+  binary = lock_entry(sandbox, "fuseraft/zest-native-test")["native"]["binaries"][native::rid()]
+  tester::assert_eq(binary["sha256"].size(), 64, "lock records the binary's checksum")
+  tester::assert(binary["resolved"].begins_with("https://github.com/fuseraft/zest-native-test/releases/download/v0.1.0/"), binary["resolved"])
+end
+
+@tester::test("native: a binary that doesn't match kiwi.lock stops the install")
+fn test_native_checksum_mismatch()
+  sandbox = new_sandbox("native-checksum")
+  zest(sandbox, ["install", "fuseraft/zest-native-test@0.1.0"])
+  lock_path = fio::combine([sandbox["project"], "kiwi.lock"])
+  lock = json::parse(fio::read(lock_path))
+  lock["packages"]["fuseraft/zest-native-test"]["native"]["binaries"][native::rid()]["sha256"] = "0" * 64
+  fio::write(lock_path, json::stringify(lock, true))
+
+  out = zest(sandbox, ["install"])
+  tester::assert(out.contains("Checksum mismatch for the ${native::rid()} binary"), out)
 end
 
 try
