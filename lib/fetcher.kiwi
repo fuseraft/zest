@@ -4,6 +4,9 @@ Downloads packages from GitHub releases/tags and manages the global cache.
 Set GITHUB_TOKEN environment variable to avoid API rate limits (60 req/hr unauthenticated).
 #/
 package fetcher
+  # The first Kiwi release with native::load.
+  const NATIVE_MIN_KIWI = ">=1.6.2"
+
   /#
   @summary Normalize a package specifier to "owner/repo" form.
   Handles:
@@ -140,32 +143,117 @@ package fetcher
   end
 
   /#
-  @summary Download and extract a package to the global cache.
+  @summary Download and extract a package to the global cache, along with its native
+  extension binary for this platform, if it has one.
   Skips the download if the version is already installed.
   @param string pkg_id : "owner/repo"
   @param string version : Exact version string.
   @param string expected_sha256 : Checksum the tarball must have, such as the one in kiwi.lock. Empty skips the check.
-  @return hashmap : { "path": install_dir, "sha256": checksum, "main": main_file, "resolved": tarball_url }
-  @throws string : On download or extraction failure, or a checksum mismatch.
+  @param hashmap expected_native : Locked native binaries by platform, whose checksums the binary must match.
+  @return hashmap : { "path": install_dir, "sha256": checksum, "main": main_file, "resolved": tarball_url, "native": binary or null }
+  @throws string : On download or extraction failure, a checksum mismatch, a Kiwi version the package
+  doesn't support, or a native extension with no binary for this platform.
   #/
-  fn install(pkg_id: string, version: string, expected_sha256: string = ""): hashmap
-    parts = pkg_id.split("/")
-    owner = parts[0]
-    repo = parts[1]
-
+  fn install(pkg_id: string, version: string, expected_sha256: string = "", expected_native: hashmap = {}): hashmap
     install_dir = fetcher::_install_dir(pkg_id, version)
 
-    # Already installed — verify and return
+    result = {}
     if fio::isdir(install_dir)
-      sha256 = fetcher::_read_meta(install_dir, ".sha256")
-      if expected_sha256 != "" && sha256 != "" && sha256 != expected_sha256
-        throw "Checksum mismatch for ${pkg_id}@${version}: kiwi.lock has ${expected_sha256}, the installed copy has ${sha256}. Delete ${install_dir} to download it again."
-      end
-      main_file = fetcher::_detect_main(install_dir, repo)
-      resolved = fetcher::_read_meta(install_dir, ".resolved")
-      resolved = fetcher::tarball_url(pkg_id, version) when resolved == ""
-      return { "path": install_dir, "sha256": sha256, "main": main_file, "resolved": resolved }
+      result = fetcher::_installed(pkg_id, version, install_dir, expected_sha256)
+    else
+      result = fetcher::_download_package(pkg_id, version, install_dir, expected_sha256)
     end
+
+    fetcher::check_kiwi(pkg_id, version, install_dir)
+    result["native"] = fetcher::install_native(pkg_id, version, install_dir, expected_native)
+    result
+  end
+
+  /#
+  @summary Check that the running Kiwi satisfies the "kiwi" constraint in an installed package's kiwi.json.
+  @param string pkg_id : "owner/repo"
+  @param string version : Exact version string.
+  @param string install_dir : Where the package is installed.
+  @throws string : If the package needs a different Kiwi version.
+  #/
+  fn check_kiwi(pkg_id: string, version: string, install_dir: string)
+    pkg_data   = fetcher::_installed_manifest(install_dir)
+    constraint = pkg_data.has_key("kiwi") ? pkg_data["kiwi"] : ""
+    return null when constraint == ""
+    fetcher::_require_kiwi(constraint, "${pkg_id}@${version}")
+  end
+
+  /#
+  @summary Install the native extension binary a package provides for this platform.
+  The "native" section of the package's kiwi.json names the extension and lists a binary per
+  platform: either a path inside the package, or a hashmap with a "url" (in which "{version}" is
+  replaced by the package version) and an optional "sha256".
+  @param string pkg_id : "owner/repo"
+  @param string version : Exact version string.
+  @param string install_dir : Where the package is installed.
+  @param hashmap expected : Locked binaries by platform, whose checksums the binary must match.
+  @return hashmap|none : { "name", "rid", "file", "sha256", "resolved" }, with "file" relative to
+  install_dir, or null if the package has no native extension.
+  @throws string : If no binary matches this platform, the download fails, or a checksum doesn't match.
+  #/
+  fn install_native(pkg_id: string, version: string, install_dir: string, expected: hashmap = {}): hashmap|none
+    pkg_data = fetcher::_installed_manifest(install_dir)
+    return null when !pkg_data.has_key("native")
+    spec = pkg_data["native"]
+
+    fetcher::_require_kiwi(fetcher::NATIVE_MIN_KIWI, "${pkg_id}@${version} has a native extension, which")
+
+    rid      = native::rid()
+    binaries = spec.has_key("binaries") ? spec["binaries"] : {}
+    if !binaries.has_key(rid)
+      supported = binaries.keys().sort().join(", ")
+      throw "${pkg_id}@${version} has no native binary for ${rid}. It has binaries for: ${supported}."
+    end
+
+    binary   = binaries[rid]
+    file     = ""
+    resolved = ""
+    declared = ""
+    if typeof(binary) == string
+      file = fetcher::_package_relative(pkg_id, binary)
+      if !fio::isfile(fio::combine([install_dir, file]))
+        throw "${pkg_id}@${version} lists ${binary} as its ${rid} binary, but the package has no such file."
+      end
+    else
+      resolved = binary["url"].replace("{version}", version)
+      declared = binary.has_key("sha256") ? binary["sha256"].lowercase() : ""
+      file     = fetcher::_native_download(pkg_id, version, install_dir, rid, resolved)
+    end
+
+    path   = fio::combine([install_dir, file])
+    sha256 = fetcher::sha256(path)
+    locked = expected.has_key(rid) ? expected[rid]["sha256"] : ""
+    for check in [[declared, "kiwi.json"], [locked, "kiwi.lock"]] do
+      if check[0] != "" && check[0] != sha256
+        fio::remove(path) when resolved != ""
+        throw "Checksum mismatch for the ${rid} binary of ${pkg_id}@${version}: ${check[1]} has ${check[0]}, the binary has ${sha256}."
+      end
+    end
+
+    name = spec.has_key("name") ? spec["name"] : pkg_id.split("/")[1].replace("-", "_").replace(".", "_")
+    { "name": name, "rid": rid, "file": file, "sha256": sha256, "resolved": resolved }
+  end
+
+  # The checksum and source of a package already in the global cache.
+  fn _installed(pkg_id: string, version: string, install_dir: string, expected_sha256: string): hashmap
+    sha256 = fetcher::_read_meta(install_dir, ".sha256")
+    if expected_sha256 != "" && sha256 != "" && sha256 != expected_sha256
+      throw "Checksum mismatch for ${pkg_id}@${version}: kiwi.lock has ${expected_sha256}, the installed copy has ${sha256}. Delete ${install_dir} to download it again."
+    end
+    main_file = fetcher::_detect_main(install_dir, pkg_id.split("/")[1])
+    resolved  = fetcher::_read_meta(install_dir, ".resolved")
+    resolved  = fetcher::tarball_url(pkg_id, version) when resolved == ""
+    { "path": install_dir, "sha256": sha256, "main": main_file, "resolved": resolved }
+  end
+
+  # Downloads, checks and extracts a package's tarball into install_dir.
+  fn _download_package(pkg_id: string, version: string, install_dir: string, expected_sha256: string): hashmap
+    repo = pkg_id.split("/")[1]
 
     # Download tarball
     tarball = fetcher::_cache_tarball_path(pkg_id, version)
@@ -295,6 +383,53 @@ package fetcher
   end
 
   # --- Private helpers ---
+
+  # The parsed kiwi.json of an installed package, or an empty hashmap if it has none.
+  fn _installed_manifest(install_dir: string): hashmap
+    path = fio::combine([install_dir, "kiwi.json"])
+    return {} when !fio::isfile(path)
+    json::parse(fio::read(path))
+  end
+
+  fn _require_kiwi(constraint: string, what: string)
+    if !semver::satisfies(KIWI_STDLIB_VERSION, constraint)
+      throw "${what} needs Kiwi ${constraint}, but this is Kiwi ${KIWI_STDLIB_VERSION}. Install a Kiwi version that satisfies it."
+    end
+  end
+
+  # A binary path from a package's kiwi.json, checked to stay inside the package.
+  fn _package_relative(pkg_id: string, path: string): string
+    normalized = path.replace("\\", "/")
+    parts      = normalized.split("/")
+    if normalized.begins_with("/") || normalized.contains(":") || parts.contains("..")
+      throw "${pkg_id} lists a native binary outside the package: ${path}"
+    end
+    fio::combine(parts.filter(with (p) do return p != "" && p != "." end))
+  end
+
+  # Downloads a native binary into install_dir/.native/<rid>/ unless it is already there,
+  # and returns its path relative to install_dir.
+  fn _native_download(pkg_id: string, version: string, install_dir: string, rid: string, url: string): string
+    name = fio::filename(url.split("?")[0])
+    file = fio::combine([".native", rid, name])
+    path = fio::combine([install_dir, file])
+    return file when fio::isfile(path)
+
+    fio::mkdirp(fio::combine([install_dir, ".native", rid]))
+    partial = "${path}.part"
+    cli::info("Downloading the ${rid} binary for ${pkg_id}@${version}...")
+    if !fetcher::_download(url, partial)
+      fio::remove(partial) when fio::isfile(partial)
+      throw "Failed to download the ${rid} binary for ${pkg_id}@${version} from ${url}"
+    end
+    fio::move(partial, path)
+    file
+  end
+
+  # No GITHUB_TOKEN here: a binary's URL can name any host.
+  fn _download(url: string, dest: string): boolean
+    http::await_download(url, dest)
+  end
 
   fn _cache_dir(): string
     fio::combine([fetcher::zest_home(), "cache"])

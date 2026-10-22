@@ -69,7 +69,7 @@ package cmd_update
         dep_versions[dep_id] = dep_entry["version"] when dep_entry != null
       end
 
-      lock_data = lockfile::pin(lock_data, pkg_id, new_version, result["resolved"], result["sha256"], result["main"], dep_versions)
+      lock_data = lockfile::pin(lock_data, pkg_id, new_version, result["resolved"], result["sha256"], result["main"], dep_versions, cmd_update::_native(result))
 
       # Update the constraint in kiwi.json to track the new version
       is_dev = mfst["dev_dependencies"].has_key(pkg_id)
@@ -149,7 +149,7 @@ package cmd_update
       dep_versions[dep_id] = dep_entry["version"] when dep_entry != null
     end
 
-    lock_data = lockfile::pin(lock_data, pkg_id, best, result["resolved"], result["sha256"], result["main"], dep_versions)
+    lock_data = lockfile::pin(lock_data, pkg_id, best, result["resolved"], result["sha256"], result["main"], dep_versions, cmd_update::_native(result))
     lockfile::save(lock_data)
 
     # Update the constraint in kiwi.json to track the new version
@@ -164,6 +164,12 @@ package cmd_update
     else
       cli::success("${pkg_id}: installed ${best}")
     end
+  end
+
+  # The lock entry for an updated package's native extension. A new version has no binaries
+  # locked yet, so only this platform's is recorded.
+  fn _native(result: hashmap)
+    result["native"] != null ? lockfile::native_entry(result["native"]) : null
   end
 
   fn _loosen_constraint(constraint: string): string

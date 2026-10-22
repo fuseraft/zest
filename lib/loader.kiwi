@@ -29,13 +29,24 @@ package loader
     for pkg_id, entry in pkgs do
       version = entry["version"]
       main_file = entry["main"]
+      install_dir = fetcher::install_path(pkg_id, version)
+
+      # A native extension loads first, so the package's Kiwi code can call it. A package
+      # can be only an extension, with no main file.
+      if entry.has_key("native")
+        lines.push("# ${pkg_id}@${version}")
+        lines.push(loader::_native_line(pkg_id, version, install_dir, entry["native"]))
+        if main_file == ""
+          lines.push("")
+          next
+        end
+      end
 
       if main_file == ""
         lines.push("# WARNING: No main file detected for ${pkg_id}@${version}")
         next
       end
 
-      install_dir = fetcher::install_path(pkg_id, version)
       full_main = fio::combine([install_dir, main_file])
 
       if !fio::isfile(full_main)
@@ -43,7 +54,7 @@ package loader
         next
       end
 
-      lines.push("# ${pkg_id}@${version}")
+      lines.push("# ${pkg_id}@${version}") when !entry.has_key("native")
       lines.push("include ${loader::_quote(full_main)}")
       lines.push("")
     end
@@ -92,6 +103,16 @@ package loader
   end
 
   # --- Private helpers ---
+
+  # The native::load line for a package's binary for this platform.
+  fn _native_line(pkg_id: string, version: string, install_dir: string, native_ext: hashmap): string
+    rid = native::rid()
+    if !native_ext["binaries"].has_key(rid)
+      return "# WARNING: No native binary for ${rid} installed for ${pkg_id}@${version}. Run `zest install`."
+    end
+    binary = fio::combine([install_dir, native_ext["binaries"][rid]["file"]])
+    "native::load(${loader::_quote(binary)}, ${loader::_quote(native_ext["name"])})"
+  end
 
   # A Kiwi string literal for a path. Windows paths are full of backslashes, and an unescaped
   # "C:\Users\nina" would read as "C:\Users" + newline + "ina".

@@ -28,9 +28,66 @@ package fetcher
     { "name": pkg_id, "version": version, "dependencies": fake_registry[pkg_id][version], "dev_dependencies": {} }
   end
 
-  fn install(pkg_id: string, version: string, expected_sha256: string = ""): hashmap
-    { "path": "/fake", "sha256": "sha-${pkg_id}-${version}", "main": "main.kiwi", "resolved": "url-${pkg_id}-${version}" }
+  fn install(pkg_id: string, version: string, expected_sha256: string = "", expected_native: hashmap = {}): hashmap
+    { "path": "/fake", "sha256": "sha-${pkg_id}-${version}", "main": "main.kiwi", "resolved": "url-${pkg_id}-${version}", "native": null }
   end
+
+  # Binary downloads copy from fake_downloads, keyed by URL.
+  fn _download(url: string, dest: string): boolean
+    return false when !fake_downloads.has_key(url)
+    fio::copy(fake_downloads[url], dest)
+    true
+  end
+end
+
+var (
+  fake_downloads: hashmap = {},
+  scratch: string = fio::combine([fio::tmpdir(), "zest_unit_native_${sys::pid()}"]),
+  rid: string = native::rid()
+)
+
+# A fake installed package in its own directory, with a kiwi.json and the given files.
+fn fake_package(name: string, pkg_data: hashmap, files: hashmap = {}): string
+  dir = fio::combine([scratch, name])
+  fio::mkdirp(dir)
+  fio::write(fio::combine([dir, "kiwi.json"]), json::stringify(pkg_data, true))
+  for rel, content in files do
+    path = fio::combine([dir, rel])
+    fio::mkdirp(fio::parentdir(path))
+    fio::write(path, content)
+  end
+  dir
+end
+
+# A hashmap holding value under this platform's RID.
+fn for_rid(value): hashmap
+  h = {}
+  h[rid] = value
+  h
+end
+
+fn error_of(f: lambda): string
+  try
+    f()
+  catch (kind, message)
+    return message
+  end
+  ""
+end
+
+# Builds tests/native/zest_test_ext.c against the Kiwi SDK next to the running interpreter's lib/.
+fn build_test_ext(out: string): boolean
+  inc   = fio::combine([fio::parentdir(env::lib()), "sdk", "c"])
+  src   = fio::combine([zest_root, "tests", "native", "zest_test_ext.c"])
+  flags = rid.begins_with("win") ? ["-shared"] : ["-shared", "-fPIC"]
+  fio::mkdirp(fio::parentdir(out))
+  for compiler in ["cc", "clang", "gcc"] do
+    try
+      return true when sys::execout(compiler, flags + ["-I", inc, src, "-o", out])["exit_code"] == 0
+    catch
+    end
+  end
+  false
 end
 
 var (app_manifest: hashmap = { "dependencies": { "o/app": "^1.0.0", "o/solo": "*" }, "dev_dependencies": {} })
@@ -135,4 +192,168 @@ fn test_quote_round_trip()
   fio::remove(script)
 end
 
-run_zest_tests("Zest unit tests")
+@tester::test("native: a package without a native section has no binary")
+fn test_native_none()
+  dir = fake_package("plain", { "name": "plain" })
+  tester::assert_eq(fetcher::install_native("o/plain", "1.0.0", dir), null)
+end
+
+@tester::test("native: a binary inside the package")
+fn test_native_path()
+  bin   = "native/${rid}/libext.bin"
+  files = {}
+  files[bin] = "abc"
+  dir = fake_package("inpkg", { "native": { "binaries": for_rid(bin) } }, files)
+  r   = fetcher::install_native("o/my-ext", "1.0.0", dir)
+  tester::assert_eq(r["file"], fio::combine(["native", rid, "libext.bin"]))
+  tester::assert_eq(r["sha256"], "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+  tester::assert_eq(r["name"], "my_ext", "the name defaults to the repository's")
+  tester::assert_eq(r["resolved"], "")
+end
+
+@tester::test("native: a binary path can't leave the package")
+fn test_native_path_escape()
+  for bad in ["../outside.so", "/etc/outside.so", "a/../../outside.so", "C:\\outside.dll"] do
+    dir = fake_package("escape", { "native": { "binaries": for_rid(bad) } })
+    m   = error_of(with () do fetcher::install_native("o/escape", "1.0.0", dir) end)
+    tester::assert(m.contains("outside the package"), "${bad}: ${m}")
+  end
+end
+
+@tester::test("native: a package with no binary for this platform fails to install")
+fn test_native_no_rid()
+  dir = fake_package("norid", { "native": { "binaries": { "plan9-mips": "x.so", "beos-x86": "y.so" } } })
+  m   = error_of(with () do fetcher::install_native("o/norid", "1.0.0", dir) end)
+  tester::assert(m.contains("no native binary for ${rid}") && m.contains("beos-x86, plan9-mips"), m)
+end
+
+@tester::test("native: a binary downloaded from a URL")
+fn test_native_url()
+  src = fio::combine([scratch, "src-url.bin"])
+  fio::write(src, "abc")
+  fake_downloads["https://example.com/v2.0.0/libext-${rid}.so?raw=1"] = src
+  url = "https://example.com/v{version}/libext-${rid}.so?raw=1"
+  dir = fake_package("url", { "native": { "name": "ext", "binaries": for_rid({ "url": url, "sha256": "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD" }) } })
+  r   = fetcher::install_native("o/url", "2.0.0", dir)
+  tester::assert_eq(r["file"], fio::combine([".native", rid, "libext-${rid}.so"]))
+  tester::assert_eq(r["resolved"], "https://example.com/v2.0.0/libext-${rid}.so?raw=1")
+  tester::assert_eq(r["name"], "ext")
+  tester::assert_eq(fio::read(fio::combine([dir, r["file"]])), "abc")
+
+  # Installing again uses the downloaded copy.
+  fake_downloads.remove("https://example.com/v2.0.0/libext-${rid}.so?raw=1")
+  tester::assert_eq(fetcher::install_native("o/url", "2.0.0", dir)["sha256"], r["sha256"])
+end
+
+@tester::test("native: a download that doesn't match its checksum is deleted")
+fn test_native_url_mismatch()
+  src = fio::combine([scratch, "src-bad.bin"])
+  fio::write(src, "not abc")
+  fake_downloads["https://example.com/bad.so"] = src
+  dir = fake_package("badsum", { "native": { "binaries": for_rid({ "url": "https://example.com/bad.so", "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" }) } })
+  m   = error_of(with () do fetcher::install_native("o/badsum", "1.0.0", dir) end)
+  tester::assert(m.contains("Checksum mismatch") && m.contains("kiwi.json"), m)
+  tester::assert(!fio::isfile(fio::combine([dir, ".native", rid, "bad.so"])), "the bad download was kept")
+end
+
+@tester::test("native: a failed download reports the URL and leaves nothing behind")
+fn test_native_url_missing()
+  dir = fake_package("nourl", { "native": { "binaries": for_rid({ "url": "https://example.com/missing.so" }) } })
+  m   = error_of(with () do fetcher::install_native("o/nourl", "1.0.0", dir) end)
+  tester::assert(m.contains("https://example.com/missing.so"), m)
+  tester::assert_eq(fio::listdir(fio::combine([dir, ".native", rid])), [])
+end
+
+@tester::test("native: the binary must match the checksum in kiwi.lock")
+fn test_native_locked_mismatch()
+  dir    = fake_package("locked", { "native": { "binaries": for_rid("lib.bin") } }, { "lib.bin": "abc" })
+  locked = {}
+  locked[rid] = { "file": "lib.bin", "sha256": "0" * 64, "resolved": "" }
+  m = error_of(with () do fetcher::install_native("o/locked", "1.0.0", dir, locked) end)
+  tester::assert(m.contains("Checksum mismatch") && m.contains("kiwi.lock"), m)
+end
+
+@tester::test("kiwi version: packages declare the Kiwi versions they support")
+fn test_check_kiwi()
+  ok = fake_package("kiwi-ok", { "kiwi": ">=1.0.0" })
+  fetcher::check_kiwi("o/ok", "1.0.0", ok)
+  fetcher::check_kiwi("o/none", "1.0.0", fake_package("kiwi-none", {}))
+  m = error_of(with () do fetcher::check_kiwi("o/new", "1.0.0", fake_package("kiwi-new", { "kiwi": ">=99.0.0" })) end)
+  tester::assert(m.contains("o/new@1.0.0 needs Kiwi >=99.0.0") && m.contains(KIWI_STDLIB_VERSION), m)
+end
+
+@tester::test("lockfile: native entries keep the binaries locked for other platforms")
+fn test_native_lock_entry()
+  installed = { "name": "ext", "rid": "linux-x64", "file": "a.so", "sha256": "1", "resolved": "" }
+  old       = { "osx-arm64": { "file": "a.dylib", "sha256": "2", "resolved": "" }, "linux-x64": { "file": "old.so", "sha256": "0", "resolved": "" } }
+  entry     = lockfile::native_entry(installed, old)
+  tester::assert_eq(entry["name"], "ext")
+  tester::assert_eq(entry["binaries"].keys().sort(), ["linux-x64", "osx-arm64"])
+  tester::assert_eq(entry["binaries"]["linux-x64"]["sha256"], "1")
+  tester::assert_eq(old["linux-x64"]["sha256"], "0", "the locked binaries were changed")
+
+  lock = lockfile::pin(lockfile::empty(), "o/ext", "1.0.0", "", "", "", {}, entry)
+  tester::assert_eq(lockfile::native_binaries(lock, "o/ext", "1.0.0").keys().sort(), ["linux-x64", "osx-arm64"])
+  tester::assert_eq(lockfile::native_binaries(lock, "o/ext", "1.1.0"), {}, "another version's binaries")
+  tester::assert_eq(lockfile::native_binaries(lock, "o/other", "1.0.0"), {})
+end
+
+@tester::test("native: load.kiwi loads a package's extension and its Kiwi code calls it")
+fn test_native_load_end_to_end()
+  home = fio::combine([scratch, "home"])
+  old_home = env::get("HOME")
+  env::set("HOME", home)
+  try
+    dir = fetcher::install_path("o/calc", "1.0.0")
+    lib = fio::combine([dir, "native", rid, native::library_name("calc")])
+    if !build_test_ext(lib)
+      # CI runners have a C compiler, so a skipped build there means lost coverage.
+      tester::assert(env::get("CI") != "true", "no C compiler (cc, clang or gcc) could build tests/native/zest_test_ext.c")
+      return null
+    end
+    fio::write(fio::combine([dir, "calc.kiwi"]), "package calc_kiwi\n  fn twice_sum(a, b)\n    calc::add(a, b) * 2\n  end\nend\n")
+
+    bin_rel = "native/${rid}/${native::library_name("calc")}"
+    binaries = {}
+    binaries[rid] = bin_rel
+    fio::write(fio::combine([dir, "kiwi.json"]), json::stringify({ "name": "calc", "native": { "binaries": binaries } }))
+
+    entry = { "version": "1.0.0", "resolved": "", "sha256": "", "main": "calc.kiwi", "dependencies": {} }
+    entry["native"] = lockfile::native_entry(fetcher::install_native("o/calc", "1.0.0", dir))
+    lock = lockfile::empty()
+    lock["packages"]["o/calc"] = entry
+
+    project = fio::combine([scratch, "project"])
+    fio::mkdirp(project)
+    loader::generate(lock, project)
+    script = fio::combine([project, "use.kiwi"])
+    fio::write(script, "include \".zest/load.kiwi\"\nprintln calc_kiwi::twice_sum(2, 3)\n")
+
+    fio::chdir(project)
+    try
+      r = sys::execout(env::bin(), [script])
+    finally
+      fio::chdir(zest_root)
+    end
+    tester::assert_eq(r["stdout"].trim(), "10", r["stderr"])
+  finally
+    env::set("HOME", old_home)
+  end
+end
+
+@tester::test("loader: warns when no binary for this platform is installed")
+fn test_native_loader_missing_rid()
+  lock = lockfile::empty()
+  lock["packages"]["o/far"] = { "version": "1.0.0", "main": "", "native": { "name": "far", "binaries": { "plan9-mips": { "file": "x.so", "sha256": "", "resolved": "" } } } }
+  project = fio::combine([scratch, "project-far"])
+  loader::generate(lock, project)
+  content = fio::read(loader::load_file_path(project))
+  tester::assert(content.contains("No native binary for ${rid} installed for o/far@1.0.0"), content)
+  tester::assert(!content.contains("native::load"), content)
+end
+
+try
+  run_zest_tests("Zest unit tests")
+finally
+  fio::rmdirf(scratch) when fio::isdir(scratch)
+end
