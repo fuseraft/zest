@@ -237,6 +237,8 @@ Auto-generated. Pins exact resolved versions and SHA256 checksums for every pack
 
 **Commit `kiwi.lock` to version control.** It ensures every collaborator and CI run installs the exact same versions.
 
+`zest install` keeps each locked version as long as it still satisfies `kiwi.json`, and checks every package against its locked checksum; a mismatch stops the install. Use `zest update` to move to newer versions.
+
 ```json
 {
   "lockfile_version": 1,
@@ -343,7 +345,7 @@ my_package::greet("world")
 
 ## Global Cache
 
-Zest stores downloaded packages globally at `~/.zest/`:
+Zest stores downloaded packages globally at `~/.zest/` (`%USERPROFILE%\.zest\` on Windows):
 
 ```
 ~/.zest/

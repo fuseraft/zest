@@ -10,12 +10,16 @@ package resolver
   Performs a BFS through the dependency tree, collects all version constraints
   per package, then finds the highest version satisfying every constraint.
 
+  A package pinned in `locked` keeps its pinned version as long as that version still
+  satisfies every constraint, so installing from kiwi.lock is reproducible.
+
   @param hashmap mfst : The project's parsed kiwi.json.
   @param boolean include_dev : Whether to include dev_dependencies.
+  @param hashmap locked : Pinned versions { pkg_id => version }, usually from kiwi.lock.
   @return hashmap : { pkg_id => resolved_version_string }
   @throws string : On version conflicts or unresolvable constraints.
   #/
-  fn resolve(mfst: hashmap, include_dev: boolean = true): hashmap
+  fn resolve(mfst: hashmap, include_dev: boolean = true, locked: hashmap = {}): hashmap
     # constraints_map: pkg_id => list of constraint strings
     constraints_map = {}
     # version_cache: pkg_id => list of available version strings (avoids duplicate API calls)
@@ -66,7 +70,7 @@ package resolver
       end
 
       # Pick a candidate version to inspect transitive deps
-      candidate = semver::max_satisfying(versions, [constraint])
+      candidate = resolver::_pick(pkg_id, versions, [constraint], locked)
       if candidate == null
         throw "No version of ${pkg_id} satisfies '${constraint}'"
       end
@@ -91,7 +95,7 @@ package resolver
         version_cache[pkg_id] = versions
       end
 
-      best = semver::max_satisfying(versions, pkg_constraints)
+      best = resolver::_pick(pkg_id, versions, pkg_constraints, locked)
 
       if best == null
         sorted = semver::sort_desc(versions)
@@ -105,6 +109,30 @@ package resolver
     end
 
     resolved
+  end
+
+  /#
+  @summary Get the pinned versions in lock data as { pkg_id => version }.
+  @param hashmap lock_data : Parsed kiwi.lock data.
+  @return hashmap
+  #/
+  fn locked_versions(lock_data: hashmap): hashmap
+    result = {}
+    for pkg_id, entry in lock_data["packages"] do
+      result[pkg_id] = entry["version"]
+    end
+    result
+  end
+
+  # The pinned version when it still exists and satisfies every constraint, else the highest that does.
+  fn _pick(pkg_id: string, versions: list, constraints: list, locked: hashmap)
+    if locked.has_key(pkg_id)
+      pinned = locked[pkg_id]
+      if versions.contains(pinned) && semver::max_satisfying([pinned], constraints) != null
+        return pinned
+      end
+    end
+    semver::max_satisfying(versions, constraints)
   end
 end
 
