@@ -69,7 +69,7 @@ package cmd_update
         dep_versions[dep_id] = dep_entry["version"] when dep_entry != null
       end
 
-      lock_data = lockfile::pin(lock_data, pkg_id, new_version, "", result["sha256"], result["main"], dep_versions)
+      lock_data = lockfile::pin(lock_data, pkg_id, new_version, result["resolved"], result["sha256"], result["main"], dep_versions)
 
       # Update the constraint in kiwi.json to track the new version
       is_dev = mfst["dev_dependencies"].has_key(pkg_id)
@@ -149,7 +149,7 @@ package cmd_update
       dep_versions[dep_id] = dep_entry["version"] when dep_entry != null
     end
 
-    lock_data = lockfile::pin(lock_data, pkg_id, best, "", result["sha256"], result["main"], dep_versions)
+    lock_data = lockfile::pin(lock_data, pkg_id, best, result["resolved"], result["sha256"], result["main"], dep_versions)
     lockfile::save(lock_data)
 
     # Update the constraint in kiwi.json to track the new version

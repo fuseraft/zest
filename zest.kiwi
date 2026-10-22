@@ -60,8 +60,7 @@ fn zest_help()
 end
 
 fn zest_cache_clean()
-  home = env::get("HOME")
-  cache_dir = fio::combine([home, ".zest", "cache"])
+  cache_dir = fetcher::cache_dir()
   if !fio::isdir(cache_dir)
     cli::info("Cache is already empty.")
     return null
