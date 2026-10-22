@@ -141,13 +141,14 @@ package fetcher
 
   /#
   @summary Download and extract a package to the global cache.
-  Skips download if the version is already cached and checksum matches.
+  Skips the download if the version is already installed.
   @param string pkg_id : "owner/repo"
   @param string version : Exact version string.
-  @return hashmap : { "path": install_dir, "sha256": checksum, "main": main_file }
-  @throws string : On download or extraction failure.
+  @param string expected_sha256 : Checksum the tarball must have, such as the one in kiwi.lock. Empty skips the check.
+  @return hashmap : { "path": install_dir, "sha256": checksum, "main": main_file, "resolved": tarball_url }
+  @throws string : On download or extraction failure, or a checksum mismatch.
   #/
-  fn install(pkg_id: string, version: string): hashmap
+  fn install(pkg_id: string, version: string, expected_sha256: string = ""): hashmap
     parts = pkg_id.split("/")
     owner = parts[0]
     repo = parts[1]
@@ -156,9 +157,14 @@ package fetcher
 
     # Already installed — verify and return
     if fio::isdir(install_dir)
+      sha256 = fetcher::_read_meta(install_dir, ".sha256")
+      if expected_sha256 != "" && sha256 != "" && sha256 != expected_sha256
+        throw "Checksum mismatch for ${pkg_id}@${version}: kiwi.lock has ${expected_sha256}, the installed copy has ${sha256}. Delete ${install_dir} to download it again."
+      end
       main_file = fetcher::_detect_main(install_dir, repo)
-      sha256 = fetcher::_read_sha256(install_dir)
-      return { "path": install_dir, "sha256": sha256, "main": main_file }
+      resolved = fetcher::_read_meta(install_dir, ".resolved")
+      resolved = fetcher::tarball_url(pkg_id, version) when resolved == ""
+      return { "path": install_dir, "sha256": sha256, "main": main_file, "resolved": resolved }
     end
 
     # Download tarball
@@ -166,39 +172,104 @@ package fetcher
     cache_dir = fetcher::_cache_dir()
     fio::mkdirp(cache_dir)
 
+    url = fetcher::tarball_url(pkg_id, version)
     if !fio::isfile(tarball)
-      tag = "v${version}"
-      url = "https://github.com/${owner}/${repo}/archive/refs/tags/${tag}.tar.gz"
       cli::info("Downloading ${pkg_id}@${version}...")
       ok = http::await_download(url, tarball)
       if !ok
         # Try without 'v' prefix
-        url = "https://github.com/${owner}/${repo}/archive/refs/tags/${version}.tar.gz"
+        url = fetcher::tarball_url(pkg_id, version, false)
         ok = http::await_download(url, tarball)
       end
       if !ok
         throw "Failed to download ${pkg_id}@${version}"
       end
+      fio::write(fetcher::_cache_meta_path(tarball), url)
+    elsif fio::isfile(fetcher::_cache_meta_path(tarball))
+      url = fio::read(fetcher::_cache_meta_path(tarball)).trim()
     end
 
-    # Compute SHA256
-    sha256 = fetcher::_sha256(tarball)
+    sha256 = fetcher::sha256(tarball)
+    if expected_sha256 != "" && sha256 != expected_sha256
+      fio::remove(tarball)
+      throw "Checksum mismatch for ${pkg_id}@${version}: kiwi.lock has ${expected_sha256}, the download has ${sha256}."
+    end
 
     # Extract to install directory
     fio::mkdirp(install_dir)
-    exit_code = sys::exec("tar", ["-xzf", tarball, "-C", install_dir, "--strip-components=1"])
+    exit_code = sys::exec(fetcher::_tar(), ["-xzf", tarball, "-C", install_dir, "--strip-components=1"])
     if exit_code != 0
       fio::rmdirf(install_dir)
       throw "Failed to extract ${pkg_id}@${version}"
     end
 
-    # Write sha256 file for future verification
+    # Record the checksum and source for later installs from the cache
     fio::write(fio::combine([install_dir, ".sha256"]), sha256)
+    fio::write(fio::combine([install_dir, ".resolved"]), url)
 
     main_file = fetcher::_detect_main(install_dir, repo)
     cli::success("Installed ${pkg_id}@${version}")
 
-    { "path": install_dir, "sha256": sha256, "main": main_file }
+    { "path": install_dir, "sha256": sha256, "main": main_file, "resolved": url }
+  end
+
+  /#
+  @summary Get the GitHub source tarball URL for a tagged version.
+  @param string pkg_id : "owner/repo"
+  @param string version : Exact version string.
+  @param boolean v_prefix : Whether the tag has a leading "v" (default true).
+  @return string
+  #/
+  fn tarball_url(pkg_id: string, version: string, v_prefix: boolean = true): string
+    tag = v_prefix ? "v${version}" : version
+    "https://github.com/${pkg_id}/archive/refs/tags/${tag}.tar.gz"
+  end
+
+  /#
+  @summary Compute the SHA-256 checksum of a file with the platform's hashing tool.
+  @param string path : File to hash.
+  @return string : Lowercase hex digest.
+  @throws string : If no hashing tool is available.
+  #/
+  fn sha256(path: string): string
+    # sha256sum: Linux. shasum: macOS. certutil: Windows.
+    attempts = [
+      ["sha256sum", [path]],
+      ["shasum", ["-a", "256", path]],
+      ["certutil", ["-hashfile", path, "SHA256"]]
+    ]
+    for attempt in attempts do
+      result = {}
+      try
+        result = sys::execout(attempt[0], attempt[1])
+      catch
+        next
+      end
+      next when result["exit_code"] != 0
+      digest = fetcher::_find_digest(result["stdout"])
+      return digest when digest != ""
+    end
+    throw "Cannot compute SHA-256 checksums: install sha256sum, shasum, or certutil."
+  end
+
+  /#
+  @summary Get the global zest directory (~/.zest, or %USERPROFILE%\.zest on Windows).
+  @return string
+  @throws string : If no home directory is set.
+  #/
+  fn zest_home(): string
+    home = env::get("HOME")
+    home = env::get("USERPROFILE") when home == ""
+    throw "Cannot find your home directory. Set HOME and try again." when home == ""
+    fio::combine([home, ".zest"])
+  end
+
+  /#
+  @summary Get the directory that holds cached tarballs.
+  @return string
+  #/
+  fn cache_dir(): string
+    fetcher::_cache_dir()
   end
 
   /#
@@ -225,17 +296,12 @@ package fetcher
 
   # --- Private helpers ---
 
-  fn _zest_home(): string
-    home = env::get("HOME")
-    fio::combine([home, ".zest"])
-  end
-
   fn _cache_dir(): string
-    fio::combine([fetcher::_zest_home(), "cache"])
+    fio::combine([fetcher::zest_home(), "cache"])
   end
 
   fn _packages_dir(): string
-    fio::combine([fetcher::_zest_home(), "packages"])
+    fio::combine([fetcher::zest_home(), "packages"])
   end
 
   fn _install_dir(pkg_id: string, version: string): string
@@ -248,6 +314,44 @@ package fetcher
     fio::combine([fetcher::_cache_dir(), "${safe_id}-${version}.tar.gz"])
   end
 
+  # Holds the URL a cached tarball was downloaded from.
+  fn _cache_meta_path(tarball: string): string
+    "${tarball}.url"
+  end
+
+  # Windows ships bsdtar as System32\tar.exe. Call it by path: a GNU tar earlier on PATH
+  # (Git for Windows has one) reads "C:" in an archive path as a remote host.
+  fn _tar(): string
+    root = env::get("SystemRoot")
+    if root != ""
+      windows_tar = fio::combine([root, "System32", "tar.exe"])
+      return windows_tar when fio::isfile(windows_tar)
+    end
+    "tar"
+  end
+
+  # The first run of 64 hex digits in a hashing tool's output. certutil on older Windows
+  # separates the bytes with spaces, so those are removed first.
+  fn _find_digest(output: string): string
+    for line in output.split("\n") do
+      text = line.trim()
+      next when text.empty()
+      word = text.split(" ")[0]
+      compact = text.replace(" ", "").lowercase()
+      return word.lowercase() when fetcher::_is_digest(word)
+      return compact when fetcher::_is_digest(compact)
+    end
+    ""
+  end
+
+  fn _is_digest(s: string): boolean
+    return false when s.size() != 64
+    for ch in s.lowercase().chars() do
+      return false when !"0123456789abcdef".contains(ch)
+    end
+    true
+  end
+
   fn _auth_headers(): hashmap
     token = env::get("GITHUB_TOKEN")
     base = { "Accept": "application/vnd.github+json", "User-Agent": "zest/1.0 kiwi-package-manager" }
@@ -257,18 +361,9 @@ package fetcher
     base
   end
 
-  fn _sha256(path: string): string
-    result = sys::execout("sha256sum", [path])
-    if result["exit_code"] != 0
-      return ""
-    end
-    parts = result["stdout"].trim().split(" ")
-    parts[0]
-  end
-
-  fn _read_sha256(install_dir: string): string
-    sha_file = fio::combine([install_dir, ".sha256"])
-    return fio::read(sha_file).trim() when fio::isfile(sha_file)
+  fn _read_meta(install_dir: string, name: string): string
+    meta_file = fio::combine([install_dir, name])
+    return fio::read(meta_file).trim() when fio::isfile(meta_file)
     ""
   end
 

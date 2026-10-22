@@ -44,7 +44,7 @@ package loader
       end
 
       lines.push("# ${pkg_id}@${version}")
-      lines.push("include \"${full_main}\"")
+      lines.push("include ${loader::_quote(full_main)}")
       lines.push("")
     end
 
@@ -92,6 +92,14 @@ package loader
   end
 
   # --- Private helpers ---
+
+  # A Kiwi string literal for a path. Windows paths are full of backslashes, and an unescaped
+  # "C:\Users\nina" would read as "C:\Users" + newline + "ina".
+  fn _quote(path: string): string
+    opener  = "$" + "{"   # written this way so it isn't read as interpolation
+    escaped = path.replace("\\", "\\\\").replace("\"", "\\\"").replace(opener, "\\" + opener)
+    "\"${escaped}\""
+  end
 
   fn _zest_dir(project_dir: string): string
     if project_dir == ""

@@ -1,0 +1,161 @@
+# End-to-end tests: run zest against real packages on GitHub (fuseraft/humanize has
+# releases 0.1.0, 0.1.1 and 0.1.2). Each test uses its own project and home directory.
+# Run from the repository root: kiwi tests/e2e.kiwi. Set GITHUB_TOKEN to avoid rate limits.
+var (zest_root: string = fio::cwd())
+include "${zest_root}/tests/harness.kiwi"
+
+var (
+  zest_script: string = fio::combine([zest_root, "zest.kiwi"]),
+  test_root:   string = fio::combine([fio::tmpdir(), "zest-e2e-${sys::pid()}"]),
+  is_windows:  boolean = fio::combine(["a", "b"]).contains("\\")
+)
+
+# A fresh project directory and home directory for one test.
+fn new_sandbox(name: string): hashmap
+  dir = fio::combine([test_root, name])
+  sandbox = { "project": fio::combine([dir, "project"]), "home": fio::combine([dir, "home"]) }
+  fio::mkdirp(sandbox["project"])
+  fio::mkdirp(sandbox["home"])
+  write_manifest(sandbox, {})
+  sandbox
+end
+
+fn write_manifest(sandbox: hashmap, deps: hashmap)
+  manifest = { "name": "e2e", "version": "0.1.0", "dependencies": deps, "dev_dependencies": {} }
+  fio::write(fio::combine([sandbox["project"], "kiwi.json"]), json::stringify(manifest, true))
+end
+
+# Runs zest in the sandbox's project with the sandbox's home directory, and returns its output.
+# On Windows only USERPROFILE is set, so the test also covers finding the home directory there.
+fn zest(sandbox: hashmap, args: list): string
+  if is_windows
+    env::set("HOME", "")
+    env::set("USERPROFILE", sandbox["home"])
+  else
+    env::set("HOME", sandbox["home"])
+  end
+  env::set("ZEST_HOME", zest_root)
+
+  fio::chdir(sandbox["project"])
+  try
+    r = sys::execout(env::bin(), [zest_script] + args)
+  finally
+    fio::chdir(zest_root)
+  end
+  r["stdout"] + r["stderr"]
+end
+
+fn lock_entry(sandbox: hashmap, pkg_id: string)
+  pkgs = json::parse(fio::read(fio::combine([sandbox["project"], "kiwi.lock"])))["packages"]
+  pkgs.has_key(pkg_id) ? pkgs[pkg_id] : null
+end
+
+# Runs a script in the project that loads its packages through .zest/load.kiwi.
+fn run_with_packages(sandbox: hashmap, code: string): string
+  script = fio::combine([sandbox["project"], "use.kiwi"])
+  fio::write(script, "include \".zest/load.kiwi\"\n${code}\n")
+  fio::chdir(sandbox["project"])
+  try
+    r = sys::execout(env::bin(), [script])
+  finally
+    fio::chdir(zest_root)
+  end
+  (r["stdout"] + r["stderr"]).trim()
+end
+
+# Installs humanize 0.1.0 and then loosens kiwi.json to ^0.1.0, which 0.1.2 also satisfies.
+fn sandbox_locked_at_0_1_0(name: string): hashmap
+  sandbox = new_sandbox(name)
+  zest(sandbox, ["install", "fuseraft/humanize@>=0.1.0,<=0.1.0"])
+  write_manifest(sandbox, { "fuseraft/humanize": "^0.1.0" })
+  sandbox
+end
+
+@tester::test("install: adds a package that scripts can load")
+fn test_install_and_use()
+  sandbox = new_sandbox("install")
+  out = zest(sandbox, ["install", "fuseraft/humanize"])
+  tester::assert(out.contains("Added fuseraft/humanize@"), out)
+  tester::assert_eq(run_with_packages(sandbox, "println humanize::filesize(123456789)"), "117.7 MiB")
+
+  entry = lock_entry(sandbox, "fuseraft/humanize")
+  tester::assert_eq(entry["sha256"].size(), 64, "lock records a SHA-256 checksum")
+  tester::assert_eq(entry["resolved"], "https://github.com/fuseraft/humanize/archive/refs/tags/v${entry["version"]}.tar.gz")
+end
+
+@tester::test("install: keeps the version pinned in kiwi.lock")
+fn test_install_keeps_locked()
+  sandbox = sandbox_locked_at_0_1_0("locked")
+  zest(sandbox, ["install"])
+  tester::assert_eq(lock_entry(sandbox, "fuseraft/humanize")["version"], "0.1.0")
+end
+
+@tester::test("install: adding a package leaves the others at their locked versions")
+fn test_install_new_keeps_others()
+  sandbox = sandbox_locked_at_0_1_0("add")
+  zest(sandbox, ["install", "fuseraft/slugify"])
+  tester::assert_eq(lock_entry(sandbox, "fuseraft/humanize")["version"], "0.1.0")
+  tester::assert(lock_entry(sandbox, "fuseraft/slugify") != null, "slugify is locked")
+end
+
+@tester::test("install: a fresh clone with a committed lock downloads its packages")
+fn test_install_fresh_clone()
+  original = sandbox_locked_at_0_1_0("clone-original")
+  zest(original, ["install"])
+
+  clone = new_sandbox("clone")
+  for name in ["kiwi.json", "kiwi.lock"] do
+    fio::copy(fio::combine([original["project"], name]), fio::combine([clone["project"], name]))
+  end
+  out = zest(clone, ["install"])
+  tester::assert(out.contains("Installed fuseraft/humanize@0.1.0"), out)
+  tester::assert_eq(run_with_packages(clone, "println humanize::ordinal(3)"), "3rd")
+end
+
+@tester::test("install: a checksum that doesn't match kiwi.lock stops the install")
+fn test_install_checksum_mismatch()
+  sandbox = sandbox_locked_at_0_1_0("checksum")
+  lock_path = fio::combine([sandbox["project"], "kiwi.lock"])
+  lock = json::parse(fio::read(lock_path))
+  lock["packages"]["fuseraft/humanize"]["sha256"] = "0" * 64
+  fio::write(lock_path, json::stringify(lock, true))
+
+  out = zest(sandbox, ["install"])
+  tester::assert(out.contains("Checksum mismatch"), out)
+  tester::assert_eq(lock_entry(sandbox, "fuseraft/humanize")["sha256"], "0" * 64, "kiwi.lock is left alone")
+end
+
+@tester::test("install: a version that doesn't exist is reported")
+fn test_install_missing_version()
+  sandbox = new_sandbox("missing")
+  out = zest(sandbox, ["install", "fuseraft/humanize@^9.0.0"])
+  tester::assert(out.contains("No version of fuseraft/humanize satisfies '^9.0.0'"), out)
+end
+
+@tester::test("update: moves past the locked version")
+fn test_update()
+  sandbox = sandbox_locked_at_0_1_0("update")
+  out = zest(sandbox, ["update", "fuseraft/humanize"])
+  tester::assert(out.contains("0.1.0 → "), out)
+  entry = lock_entry(sandbox, "fuseraft/humanize")
+  tester::assert(entry["version"] != "0.1.0", "version changed")
+  tester::assert_eq(entry["resolved"], "https://github.com/fuseraft/humanize/archive/refs/tags/v${entry["version"]}.tar.gz")
+end
+
+@tester::test("uninstall: the package leaves kiwi.lock and load.kiwi")
+fn test_uninstall()
+  sandbox = new_sandbox("uninstall")
+  zest(sandbox, ["install", "fuseraft/humanize"])
+  zest(sandbox, ["install", "fuseraft/slugify"])
+  zest(sandbox, ["uninstall", "fuseraft/slugify"])
+  zest(sandbox, ["install"])
+  tester::assert_eq(lock_entry(sandbox, "fuseraft/slugify"), null)
+  load = fio::read(fio::combine([sandbox["project"], ".zest", "load.kiwi"]))
+  tester::assert(!load.contains("slugify"), load)
+end
+
+try
+  run_zest_tests("Zest end-to-end tests")
+finally
+  fio::rmdirf(test_root) when fio::exists(test_root)
+end

@@ -237,6 +237,8 @@ Auto-generated. Pins exact resolved versions and SHA256 checksums for every pack
 
 **Commit `kiwi.lock` to version control.** It ensures every collaborator and CI run installs the exact same versions.
 
+`zest install` keeps each locked version as long as it still satisfies `kiwi.json`, and checks every package against its locked checksum; a mismatch stops the install. Use `zest update` to move to newer versions.
+
 ```json
 {
   "lockfile_version": 1,
@@ -343,7 +345,7 @@ my_package::greet("world")
 
 ## Global Cache
 
-Zest stores downloaded packages globally at `~/.zest/`:
+Zest stores downloaded packages globally at `~/.zest/` (`%USERPROFILE%\.zest\` on Windows):
 
 ```
 ~/.zest/
@@ -371,6 +373,19 @@ zest install owner/repo  # install any package directly (registry not required)
 ```
 
 To register your package, see [fuseraft/zest-registry](https://github.com/fuseraft/zest-registry) for the submission guide.
+
+---
+
+## Running the Tests
+
+From the repository root:
+
+```bash
+kiwi tests/unit.kiwi   # offline: resolution, kiwi.lock and helpers
+kiwi tests/e2e.kiwi    # installs real packages from GitHub into temporary directories
+```
+
+The end-to-end tests use their own home directory, so they don't touch `~/.zest`. Set `GITHUB_TOKEN` to avoid API rate limits. CI runs both on Linux, macOS and Windows against the latest Kiwi release.
 
 ---
 

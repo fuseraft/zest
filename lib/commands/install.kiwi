@@ -36,15 +36,14 @@ package cmd_install
     cli::info("Resolving dependencies...")
     resolved = {}
     try
-      resolved = resolver::resolve(mfst)
+      resolved = resolver::resolve(mfst, true, resolver::locked_versions(lock_data))
     catch (e, m)
       cli::error(m)
       return null
     end
 
-    for pkg_id, version in resolved do
-      lock_data = cmd_install::_do_install(pkg_id, version, lock_data)
-    end
+    lock_data = cmd_install::_install_resolved(resolved, lock_data)
+    return null when lock_data == null
 
     lockfile::save(lock_data)
     loader::generate(lock_data)
@@ -98,15 +97,15 @@ package cmd_install
 
     resolved = {}
     try
-      resolved = resolver::resolve(mfst)
+      resolved = resolver::resolve(mfst, true, resolver::locked_versions(lock_data))
     catch (e, m)
       cli::error("Dependency conflict: ${m}")
       return null
     end
 
-    for r_pkg_id, r_version in resolved do
-      lock_data = cmd_install::_do_install(r_pkg_id, r_version, lock_data)
-    end
+    lock_data = cmd_install::_install_resolved(resolved, lock_data)
+    return null when lock_data == null
+    best = resolved[pkg_id]
 
     manifest::save(mfst)
     lockfile::save(lock_data)
@@ -119,27 +118,52 @@ package cmd_install
     cli::info("Add `include \".zest/load.kiwi\"` to your scripts.")
   end
 
-  fn _do_install(pkg_id: string, version: string, lock_data: hashmap): hashmap
+  # Installs every resolved package and returns lock data pinning exactly that set, so
+  # packages no longer in the dependency graph drop out of kiwi.lock and load.kiwi.
+  # Returns null if any package fails to install; nothing is saved then.
+  fn _install_resolved(resolved: hashmap, lock_data: hashmap)
+    new_lock = lockfile::empty()
+    for pkg_id, version in resolved do
+      entry = cmd_install::_do_install(pkg_id, version, lock_data)
+      return null when entry == null
+      new_lock["packages"][pkg_id] = entry
+    end
+
+    # Each entry's dependencies record the versions resolved alongside it.
+    for pkg_id, entry in new_lock["packages"] do
+      for dep_id, _ in entry["dependencies"] do
+        entry["dependencies"][dep_id] = resolved[dep_id] when resolved.has_key(dep_id)
+      end
+    end
+    new_lock
+  end
+
+  # Installs one package (from the cache when present) and returns its lock entry, or null on failure.
+  fn _do_install(pkg_id: string, version: string, lock_data: hashmap)
     existing = lockfile::get(lock_data, pkg_id)
-    return lock_data when existing != null && existing["version"] == version
+    expected = existing != null && existing["version"] == version ? existing["sha256"] : ""
 
     result = {}
     try
-      result = fetcher::install(pkg_id, version)
+      result = fetcher::install(pkg_id, version, expected)
     catch (e, m)
       cli::error("Failed to install ${pkg_id}@${version}: ${m}")
-      return lock_data
+      return null
     end
 
     pkg_mfst    = fetcher::get_package_manifest(pkg_id, version)
     dep_versions = {}
     for dep_id, _ in pkg_mfst["dependencies"] do
-      dep_entry = lockfile::get(lock_data, dep_id)
-      dep_versions[dep_id] = dep_entry["version"] when dep_entry != null
+      dep_versions[dep_id] = ""
     end
 
-    resolved_url = "https://github.com/${pkg_id}/archive/refs/tags/v${version}.tar.gz"
-    lockfile::pin(lock_data, pkg_id, version, resolved_url, result["sha256"], result["main"], dep_versions)
+    {
+      "version": version,
+      "resolved": result["resolved"],
+      "sha256": result["sha256"],
+      "main": result["main"],
+      "dependencies": dep_versions
+    }
   end
 end
 

@@ -95,7 +95,7 @@ package cmd_outdated
     semver::compare(sorted.first(), installed) > 0
   end
 
-  fn _latest_satisfying(pkg_id: string, constraint: string): string
+  fn _latest_satisfying(pkg_id: string, constraint: string): string|none
     versions = fetcher::get_versions(pkg_id)
     sorted = semver::sort_desc(versions)
     sorted.empty() ? null : sorted.first()

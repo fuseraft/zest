@@ -132,7 +132,7 @@ package semver
   @param list constraints : List of constraint strings (all must be satisfied).
   @return string|null : Best matching version, or null if none.
   #/
-  fn max_satisfying(versions: list, constraints: list): string
+  fn max_satisfying(versions: list, constraints: list): string|none
     best = null
     for v in versions do
       ok = true
