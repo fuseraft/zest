@@ -61,7 +61,8 @@ fn run_with_packages(sandbox: hashmap, code: string): string
   finally
     fio::chdir(zest_root)
   end
-  (r["stdout"] + r["stderr"]).trim()
+  # println ends lines with CRLF on Windows.
+  (r["stdout"] + r["stderr"]).replace("\r\n", "\n").trim()
 end
 
 # Installs humanize 0.1.0 and then loosens kiwi.json to ^0.1.0, which 0.1.2 also satisfies.
