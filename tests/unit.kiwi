@@ -151,23 +151,31 @@ fn test_lock_entries()
   tester::assert_eq(pkgs["o/core"]["sha256"], "sha-o/core-2.1.0")
 end
 
-@tester::test("fetcher: finds the digest in each hashing tool's output")
-fn test_find_digest()
-  d      = "7abc3381e40308213b197b73859f6b4e0efc4c84f1b2c4118a1fd81f78c8f317"
-  spaced = "7a bc 33 81 e4 03 08 21 3b 19 7b 73 85 9f 6b 4e 0e fc 4c 84 f1 b2 c4 11 8a 1f d8 1f 78 c8 f3 17"
-  tester::assert_eq(fetcher::_find_digest("${d}  /tmp/file.tar.gz\n"), d, "sha256sum / shasum")
-  tester::assert_eq(fetcher::_find_digest("SHA256 hash of C:\\f.tar.gz:\r\n${d}\r\nCertUtil: -hashfile command completed successfully.\r\n"), d, "certutil")
-  tester::assert_eq(fetcher::_find_digest("SHA256 hash of file C:\\f.tar.gz:\r\n${spaced.uppercase()}\r\nCertUtil: -hashfile command completed successfully.\r\n"), d, "older certutil")
-  tester::assert_eq(fetcher::_find_digest("error: no such file\n"), "", "no digest")
-end
-
-@tester::test("fetcher: hashes a file with the platform's tool")
+@tester::test("fetcher: hashes a file")
 fn test_sha256_file()
   path = fio::combine([fio::tmpdir(), "zest_unit_${sys::pid()}.txt"])
   fio::write(path, "abc")
   digest = fetcher::sha256(path)
   fio::remove(path)
   tester::assert_eq(digest, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+end
+
+@tester::test("fetcher: a file that can't be hashed is an error naming it")
+fn test_sha256_missing_file()
+  path = fio::combine([fio::tmpdir(), "zest_unit_missing_${sys::pid()}.txt"])
+  message = ""
+  try
+    fetcher::sha256(path)
+  catch (kind, m)
+    message = m
+  end
+  tester::assert(message.begins_with("Cannot compute the SHA-256 checksum of ${path}: "), message)
+end
+
+@tester::test("fetcher: zest runs on this Kiwi")
+fn test_check_zest_kiwi()
+  fetcher::check_zest_kiwi()
+  tester::assert(semver::satisfies(KIWI_STDLIB_VERSION, fetcher::MIN_KIWI))
 end
 
 @tester::test("fetcher: tarball URLs with and without a v prefix")

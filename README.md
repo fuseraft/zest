@@ -36,7 +36,7 @@ Or with options:
 .\install.ps1 -Uninstall
 ```
 
-Requires [Kiwi](https://github.com/fuseraft/kiwi) to be installed and available in your PATH.
+Requires [Kiwi](https://github.com/fuseraft/kiwi) 1.7.0 or later, installed and available in your PATH. The installers and `zest` itself stop with an error on an older Kiwi.
 
 ### GitHub API rate limits
 
@@ -372,7 +372,6 @@ A package can ship a [native extension](https://fuseraft.ai/kiwi/stdlib/native/)
 - **Platforms** are named by their runtime ID, as [`native::rid()`](https://fuseraft.ai/kiwi/stdlib/native/) returns it: `linux-x64`, `linux-arm64`, `osx-x64`, `osx-arm64` or `win-x64`.
 - **A binary** is either a path inside the package, or a `url` to download it from, such as a release asset. `{version}` in the URL is replaced by the package version. A `sha256` is optional; when it's given, the download must match it.
 - **`name`** is the Kiwi package the extension's functions are registered under. It defaults to the repository name, with `-` and `.` replaced by `_`. It can be the same as your Kiwi package's name, and then the extension's functions and the package's share one namespace.
-- Native extensions need Kiwi 1.6.2 or later.
 
 `zest install` fetches the binary for the current platform, and fails if the package has none. It records the binary's checksum in `kiwi.lock` under that platform, so a project locked on Linux and then installed on Windows keeps both. A binary that later doesn't match its locked checksum stops the install. `.zest/load.kiwi` loads the extension before the package's main file, so the package's Kiwi code can call it:
 

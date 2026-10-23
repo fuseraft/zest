@@ -18,6 +18,13 @@ include "${_zest_home}/lib/commands/outdated.kiwi"
 include "${_zest_home}/lib/commands/search.kiwi"
 include "${_zest_home}/lib/commands/publish.kiwi"
 
+try
+  fetcher::check_zest_kiwi()
+catch (kind, message)
+  cli::error(message)
+  exit(1)
+end
+
 # --- CLI definition ---
 
 p = CliParser.new("zest <command> [pkg[@constraint] ...]", "Package manager for the Kiwi programming language")
