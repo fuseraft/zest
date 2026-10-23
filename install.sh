@@ -143,6 +143,28 @@ command -v kiwi >/dev/null 2>&1 \
   || die "Kiwi is not installed or not in PATH. Install Kiwi first: https://github.com/fuseraft/kiwi"
 info "kiwi      : $(command -v kiwi)"
 
+# zest needs crypto::file_hash, added in Kiwi 1.7.0.
+MIN_KIWI="1.7.0"
+KIWI_VERSION="$(kiwi -v 2>/dev/null | awk '{print $2}')"
+
+# Whether version $1 is at least $2 (major.minor.patch; a -pre or +build suffix is ignored).
+version_at_least() {
+  local a b i
+  IFS=. read -r -a a <<< "${1%%[-+]*}"
+  IFS=. read -r -a b <<< "${2%%[-+]*}"
+  for i in 0 1 2; do
+    [[ "${a[i]:-0}" =~ ^[0-9]+$ ]] || return 1
+    (( 10#${a[i]:-0} > 10#${b[i]:-0} )) && return 0
+    (( 10#${a[i]:-0} < 10#${b[i]:-0} )) && return 1
+  done
+  return 0
+}
+
+if [[ -z "$KIWI_VERSION" ]] || ! version_at_least "$KIWI_VERSION" "$MIN_KIWI"; then
+  die "zest needs Kiwi $MIN_KIWI or later, but this is Kiwi ${KIWI_VERSION:-(unknown)}. Upgrade Kiwi first: https://github.com/fuseraft/kiwi"
+fi
+info "version   : $KIWI_VERSION"
+
 # -------------------------------------------------------------------------
 # Sudo Check for System Install
 # -------------------------------------------------------------------------

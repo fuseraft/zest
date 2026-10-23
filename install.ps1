@@ -155,6 +155,16 @@ if (-not $kiwiPath) {
 }
 Write-Info "kiwi      : $($kiwiPath.Source)"
 
+# zest needs crypto::file_hash, added in Kiwi 1.7.0.
+$minKiwi = [version]'1.7.0'
+$kiwiVersionText = ''
+if ((& kiwi -v 2>$null | Out-String) -match '^\s*\S+\s+(\S+)') { $kiwiVersionText = $Matches[1] }
+$kiwiVersion = $null
+if (-not [version]::TryParse($kiwiVersionText, [ref]$kiwiVersion) -or $kiwiVersion -lt $minKiwi) {
+    Write-Fatal "zest needs Kiwi $minKiwi or later, but this is Kiwi $(if ($kiwiVersionText) { $kiwiVersionText } else { '(unknown)' }). Upgrade Kiwi first: https://github.com/fuseraft/kiwi"
+}
+Write-Info "version   : $kiwiVersion"
+
 # -------------------------------------------------------------------------
 # Update: remove old install first
 # -------------------------------------------------------------------------

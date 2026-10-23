@@ -4,8 +4,8 @@ Downloads packages from GitHub releases/tags and manages the global cache.
 Set GITHUB_TOKEN environment variable to avoid API rate limits (60 req/hr unauthenticated).
 #/
 package fetcher
-  # The first Kiwi release with native::load.
-  const NATIVE_MIN_KIWI = ">=1.6.2"
+  # The Kiwi versions zest runs on: 1.7.0 added crypto::file_hash.
+  const MIN_KIWI = ">=1.7.0"
 
   /#
   @summary Normalize a package specifier to "owner/repo" form.
@@ -201,8 +201,6 @@ package fetcher
     return null when !pkg_data.has_key("native")
     spec = pkg_data["native"]
 
-    fetcher::_require_kiwi(fetcher::NATIVE_MIN_KIWI, "${pkg_id}@${version} has a native extension, which")
-
     rid      = native::rid()
     binaries = spec.has_key("binaries") ? spec["binaries"] : {}
     if !binaries.has_key(rid)
@@ -314,30 +312,25 @@ package fetcher
   end
 
   /#
-  @summary Compute the SHA-256 checksum of a file with the platform's hashing tool.
+  @summary Compute the SHA-256 checksum of a file.
   @param string path : File to hash.
   @return string : Lowercase hex digest.
-  @throws string : If no hashing tool is available.
+  @throws string : If the file can't be read.
   #/
   fn sha256(path: string): string
-    # sha256sum: Linux. shasum: macOS. certutil: Windows.
-    attempts = [
-      ["sha256sum", [path]],
-      ["shasum", ["-a", "256", path]],
-      ["certutil", ["-hashfile", path, "SHA256"]]
-    ]
-    for attempt in attempts do
-      result = {}
-      try
-        result = sys::execout(attempt[0], attempt[1])
-      catch
-        next
-      end
-      next when result["exit_code"] != 0
-      digest = fetcher::_find_digest(result["stdout"])
-      return digest when digest != ""
+    try
+      return crypto::file_hash(path, "SHA256")
+    catch (err, message)
+      throw "Cannot compute the SHA-256 checksum of ${path}: ${message}"
     end
-    throw "Cannot compute SHA-256 checksums: install sha256sum, shasum, or certutil."
+  end
+
+  /#
+  @summary Stop with an error unless this Kiwi satisfies MIN_KIWI.
+  @throws string : If this Kiwi is too old.
+  #/
+  fn check_zest_kiwi()
+    fetcher::_require_kiwi(fetcher::MIN_KIWI, "zest")
   end
 
   /#
@@ -463,28 +456,6 @@ package fetcher
       return windows_tar when fio::isfile(windows_tar)
     end
     "tar"
-  end
-
-  # The first run of 64 hex digits in a hashing tool's output. certutil on older Windows
-  # separates the bytes with spaces, so those are removed first.
-  fn _find_digest(output: string): string
-    for line in output.split("\n") do
-      text = line.trim()
-      next when text.empty()
-      word = text.split(" ")[0]
-      compact = text.replace(" ", "").lowercase()
-      return word.lowercase() when fetcher::_is_digest(word)
-      return compact when fetcher::_is_digest(compact)
-    end
-    ""
-  end
-
-  fn _is_digest(s: string): boolean
-    return false when s.size() != 64
-    for ch in s.lowercase().chars() do
-      return false when !"0123456789abcdef".contains(ch)
-    end
-    true
   end
 
   fn _auth_headers(): hashmap
